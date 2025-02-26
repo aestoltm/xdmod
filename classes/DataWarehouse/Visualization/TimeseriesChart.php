@@ -640,7 +640,8 @@ class TimeseriesChart extends AggregateChart
                         $value_count = count($xValues);
 
                         if (($this->_aggregationUnit == 'Day' || $this->_aggregationUnit == 'day')) {
-                            $this->_chart['layout']['xaxis']['tickmode'] = 'auto';
+                            $day_dtick = max(floor($value_count / 14), 1);
+                            $this->_chart['layout']['xaxis']['dtick'] = $pointInterval * $day_dtick;
                         }
 
                         if ($this->_aggregationUnit == 'Month' || $this->_aggregationUnit == 'month') {
