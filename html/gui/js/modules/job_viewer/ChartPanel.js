@@ -130,7 +130,7 @@ XDMoD.Module.JobViewer.ChartPanel = Ext.extend(Ext.Panel, {
          * @param record
          */
         load_record: function (panel, record) {
-            var self = this;
+            const self = this;
 
             if (record !== null && record !== undefined) {
                 this.dataurl = record.store.proxy.url;
@@ -142,27 +142,33 @@ XDMoD.Module.JobViewer.ChartPanel = Ext.extend(Ext.Panel, {
             }
 
             if (record) {
-                var chartOptions = generateChartOptions(record);
+                const chartOptions = generateChartOptions(record);
+                const chartConfig = {
+                    displayModeBar: false,
+                    doubleClick: 'reset',
+                    doubleClickDelay: 500,
+                    showAxisRangeEntryBoxes: false
+                };
                 panel.getEl().unmask();
 
                 if (panel.chart) {
-                    Plotly.react(this.id, chartOptions.data, chartOptions.layout, { displayModeBar: false, doubleClick: 'reset' });
+                    Plotly.react(this.id, chartOptions.data, chartOptions.layout, chartConfig);
                 } else {
-                    Plotly.newPlot(this.id, chartOptions.data, chartOptions.layout, { displayModeBar: false, doubleClick: 'reset' });
+                    Plotly.newPlot(this.id, chartOptions.data, chartOptions.layout, chartConfig);
 
                     panel.chart = document.getElementById(this.id);
                     panel.chart.on('plotly_click', function (data, event) {
-                        var userOptions = data.points[0].data.chartSeries;
+                        const userOptions = data.points[0].data.chartSeries;
                         if (!userOptions || !userOptions.dtype) {
                             return;
                         }
-                        var drilldown;
+                        let drilldown;
                         /*
                          * The drilldown data are stored on each point for envelope
                          * plots and for the series for simple plots.
                          */
                         if (userOptions.dtype === 'index') {
-                            var nodeidIndex = data.points[0].pointIndex;
+                            const nodeidIndex = data.points[0].pointIndex;
                             if (nodeidIndex === -1) {
                                 return;
                             }
@@ -176,8 +182,8 @@ XDMoD.Module.JobViewer.ChartPanel = Ext.extend(Ext.Panel, {
                                 value: userOptions[userOptions.dtype]
                             };
                         }
-                        var path = self.path.concat([drilldown]);
-                        var token = self.jobViewer.module_id + '?' + self.jobViewer._createHistoryTokenFromArray(path);
+                        const path = self.path.concat([drilldown]);
+                        const token = self.jobViewer.module_id + '?' + self.jobViewer._createHistoryTokenFromArray(path);
                         Ext.History.add(token);
                     });
                 }
