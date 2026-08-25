@@ -46,15 +46,6 @@ class RestIngestor extends aIngestor implements iAction
     // The current url, useful for debugging
     protected $currentUrl = null;
 
-    // List of transformation and verificaiton directives to apply to request parameters. Keys are
-    // parameter names and values are an object containing the directives.
-    protected $parameterDirectives = array();
-
-    // List of transformation and verificaiton directives to apply to request response fields. Keys
-    // are response keys (not database column names) and values are an object containing the
-    // directives.
-    protected $responseDirectives = array();
-
     // This action does not (yet) support multiple destination tables. If multiple destination
     // tables are present, store the first here and use it.
     protected $etlDestinationTable = null;
@@ -88,43 +79,36 @@ class RestIngestor extends aIngestor implements iAction
 
         parent::initialize($etlOverseerOptions);
 
-        if ( ! $this->sourceEndpoint instanceof Rest ) {
-            $this->logAndThrowException("Source endpoint is not an instance of ETL\\DataEndpoint\\Rest");
-        }
-
-        $this->sourceEndpoint->connect();
-        $this->utilityEndpoint->connect();
-
-        if ( ! $this->utilityEndpoint instanceof aRdbmsEndpoint ) {
-            $this->utilityEndpoint = null;
-            $this->logAndThrowException("Source endpoint is not an instance of ETL\\DataEndpoint\\aRdbmsEndpoint");
-        }
-
-        // This action only supports 1 destination table so use the first one and log a warning if
-        // there are multiple.
-
-        reset($this->etlDestinationTableList);
-        $this->etlDestinationTable = current($this->etlDestinationTableList);
-        $etlTableKey = key($this->etlDestinationTableList);
-        if ( count($this->etlDestinationTableList) > 1 ) {
-            $this->logger->warning(
+        if ( ! $this->utilityEndpoint instanceof iRdbmsEndpoint ) {
+            $this->logAndThrowException(
                 sprintf(
-                    "%s does not support multiple ETL destination tables, using first table with key: '%s'",
-                    $this,
-                    $etlTableKey
+                    "Source endpoint %s does not implement ETL\\DataEndpoint\\iRdbmsEndpoint",
+                    get_class($this->sourceEndpoint)
                 )
             );
         }
+
+        if ( ! $this->sourceEndpoint instanceof Rest ) {
+            $this->logAndThrowException(
+                sprintf(
+                    "Source endpoint %s does not implement ETL\\DataEndpoint\\Rest",
+                    get_class($this->sourceEndpoint)
+                )
+            );
+        }
+
+        $this->sourceEndpoint->connect();
 
         // If the source query is specified in the definition file use it to obtain parameters for the
         // rest call. For each record returned by the source query, add the returned columnms to the
         // parameter list and generate one rest call. THIS OVERRIDES THE NEXT/PREV KEYS IN THE RESPONSE!
 
         if ( null === $this->etlSourceQuery && isset($this->parsedDefinitionFile->source_query) ) {
-            $this->logger->info("Create ETL source query object");
+            $this->logger->debug("Create ETL source query object");
             $this->etlSourceQuery = new Query(
                 $this->parsedDefinitionFile->source_query,
-                $this->utilityEndpoint->getSystemQuoteChar()
+                $this->utilityEndpoint->getSystemQuoteChar(),
+                $this->logger
             );
 
             // If supported by the source query, set the date ranges here.
@@ -138,18 +122,15 @@ class RestIngestor extends aIngestor implements iAction
         $defaultRestResponseConfig = (object) array(
             // Optional top-level entry point into the result. NSF api uses "response".
             "response" => null,
-            // Optional count for the number of results returned
-            "count"    => "count",
-            // Property for the results list
-            "results"  => "results",
-            // Optional property to identify the next page of results
-            "next"     => "next",
-            // Optional property to identify the previous page of results
-            "prev"     => "previous",
-            // Error response handling
-            "error"    => null
-            );
+        );
 
+        if ( null !== $this->restRequestConfig && ! is_object($this->restRequestConfig) ) {
+            $this->logAndThrowException("REST request config must be an object");
+        } elseif ( null !== $this->restResponseConfig && ! is_object($this->restResponseConfig) ) {
+            $this->logAndThrowException("REST response config must be an object");
+        }
+
+        // Rest response
         if ( null === $this->restResponseConfig && isset($this->parsedDefinitionFile->rest_response) ) {
             $this->restResponseConfig = (object) array_merge(
                 (array) $defaultRestResponseConfig,
@@ -159,6 +140,7 @@ class RestIngestor extends aIngestor implements iAction
             $this->logAndThrowException("rest_response key not found in definition file");
         }
 
+        // Rest Request
         if ( null === $this->restRequestConfig && isset($this->parsedDefinitionFile->rest_request) ) {
             $this->restRequestConfig = $this->parsedDefinitionFile->rest_request;
         } elseif ( ! isset($this->parsedDefinitionFile->rest_response) ) {
@@ -166,9 +148,7 @@ class RestIngestor extends aIngestor implements iAction
         }
 
         // --------------------------------------------------------------------------------
-        // The values for the request parameter and result field map configuration may be an object
-        // containing transformation and verification directives.  Separate the directives out into
-        // their own lists, leaving the parameters and field_map as simple key-value pairs.
+        // The values for the request parameter and result field map
 
         if ( isset($this->restRequestConfig->parameters) ) {
             foreach ( $this->restRequestConfig->parameters as $parameter => &$value ) {
@@ -179,44 +159,11 @@ class RestIngestor extends aIngestor implements iAction
                     $this->logger->warning("{$this} Parameter '$parameter' object does not specify a 'value' key, skipping");
                     continue;
                 }
-                $this->parameterDirectives[$parameter] = $value;
                 $value = $value->value;
             }
             unset($value); // Sever the reference with the last element
 
         }  // if ( isset($this->restRequestConfig->parameters) )
-
-        if ( isset($this->restResponseConfig->field_map) ) {
-            foreach ( $this->restResponseConfig->field_map as $key => &$value ) {
-                if ( ! is_object($value) ) {
-                    continue;
-                }
-                if ( ! isset($value->name) ) {
-                    $this->logger->warning("{$this} Response field map '$key' object does not specify a 'name' key, skipping");
-                    continue;
-                }
-                // Use the response field name as the key so we can make easy lookups in the response object
-                $this->responseDirectives[$value->name] = $value;
-                $value = $value->name;
-            }
-            unset($value); // Sever the reference with the last element
-        }  // if ( isset($this->restRequestConfig->field_map) )
-
-        if ( null !== $this->restRequestConfig && ! is_object($this->restRequestConfig) ) {
-            $this->logAndThrowException("REST request config must be an object");
-        } elseif ( null !== $this->restResponseConfig && ! is_object($this->restResponseConfig) ) {
-            $this->logAndThrowException("REST response config must be an object");
-        }
-
-        // Verify that any type formatting directives in the request and response are valid
-
-        foreach ( $this->parameterDirectives as $parameter => $directives ) {
-            $this->verifyVerifyDirective($parameter, $directives);
-        }  // if ( isset($this->restRequestConfig->parameters) )
-
-        foreach ( $this->responseDirectives as $key => $directives ) {
-            $this->verifyVerifyDirective($key, $directives);
-        }  // if ( isset($this->restRequestConfig->field_map) )
 
         $this->initialized = true;
 
@@ -233,20 +180,6 @@ class RestIngestor extends aIngestor implements iAction
     {
 
         parent::performPreExecuteTasks();
-
-        $this->destinationTableColumnNames = $this->etlDestinationTable->getColumnNames();
-
-        // If the field map is set, ensure that all destination colums exist in the table
-
-        if ( isset($this->restResponseConfig->field_map) ) {
-            $diff = array_diff(
-                array_keys((array) $this->restResponseConfig->field_map),
-                $this->destinationTableColumnNames
-            );
-            if ( 0 != count($diff) ) {
-                $this->logAndThrowException("Field map includes columns not in destination table: " . implode(",", $diff));
-            }
-        }  // if ( isset($this->restResponseConfig->field_map) )
 
         // If using a source query, execute it and prepare the result set
 
@@ -266,11 +199,6 @@ class RestIngestor extends aIngestor implements iAction
             }
         }  // if ( null !== $this->etlSourceQuery ) {
 
-        // Verify all directives prior to executing the main body. This keeps the apply() functions
-        // leaner.
-
-        $this->verifyDirectives();
-
         // Apply any parameters that are defined
 
         $this->processParameters();
@@ -288,23 +216,8 @@ class RestIngestor extends aIngestor implements iAction
     protected function _execute()
     {
         // Support a source query, mapping from the source to rest parameters, rest field map
-
         $requestHeaders = ( isset($this->restRequestConfig->requestHeaders) ? (array) $this->restRequestConfig->requestHeaders : [] );
-        // Set up properties used to access data in the result set. Some properties may not be provided.
-        $responseKey = ( isset($this->restResponseConfig->response) ? $this->restResponseConfig->response : null );
-        $errorKey = ( isset($this->restResponseConfig->error) ? $this->restResponseConfig->error : null );
-        $countKey = ( isset($this->restResponseConfig->count) ? $this->restResponseConfig->count : null );
-        $resultsKey = ( isset($this->restResponseConfig->results) ? $this->restResponseConfig->results : null );
-        $nextKey = ( isset($this->restResponseConfig->next) ? $this->restResponseConfig->next : null );
-        $prevKey = ( isset($this->restResponseConfig->prev) ? $this->restResponseConfig->prev : null );
-        $fieldMap = ( isset($this->restResponseConfig->field_map) ? (array) $this->restResponseConfig->field_map : null );
-
-        $reservedKeys = array_filter(
-            array($countKey, $resultsKey, $nextKey, $prevKey),
-            function ($value) {
-                return ( null !== $value );
-            }
-        );
+        $responseKey = ( isset($this->restResponseConfig->reponse) ? $this->restResponseConfig->response : null );
 
         // --------------------------------------------------------------------------------
         // Perform a-priori verifications
@@ -336,212 +249,192 @@ class RestIngestor extends aIngestor implements iAction
             return 0;
         }
 
-        $numRecordsProcessed = 0;
         $numRequestsMade = 1;
         $logCount = 10000;
         $first = true;
 
-        while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
+        $warnings = [];
 
-            if ( 0 !== curl_errno($this->sourceHandle) ) {
-                $this->logger->error("${this} Error during REST call: " . curl_error($this->sourceHandle));
-                break;
-            }
+        if(!$this->destinationHandle->beginTransaction()) {
+            $this->logAndThrowException(
+                "Could not start transaction. Skipping ingestion.",
+                ['endpoint' => $this]
+            );
+        }
 
-            $response = json_decode($retval);
+        $insertStatments = = [];
+        $destinationFieldIdToSourceFieldMap = [];
+        $numRecords = 0;
 
-            if ( null === $response || ! is_object($response) ) {
-                $this->logger->error("{$this} Response is not an object: $retval");
-                break;
-            }
+        try {
+            while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
 
-            // --------------------------------------------------------------------------------
-            // Identify the various parts of the response based on the configuration and verify them
+                if ( 0 !== curl_errno($this->sourceHandle) ) {
+                    $this->logger->logAndThrowException("${this} Error during REST call: " . curl_error($this->sourceHandle));
+                }
 
-            // If a top level response key is provided, grab the data that it contains. The NSF award
-            // search API uses this.
+                $response = json_decode($retval, true);
 
-            if ( $responseKey !== null ) {
-                if ( ! isset($response->$responseKey) ) {
-                    if ( isset($response->$errorKey) ) {
-                        $this->logger->warning("Error querying {$this->currentUrl}");
-                        $this->logger->warning("Error response: " . print_r($response->$errorKey, true));
-                        if ( false === $this->setNextUrl($response, $nextKey) ) {
-                            break;
-                        }
-                        continue;
-                    } else {
+                if ( null === $response || ! is_array($response) ) {
+                    $this->logger->logAndThrowException("{$this} Response is not an array: $retval");
+                }
+
+                // --------------------------------------------------------------------------------
+                // Identify the various parts of the response based on the configuration and verify them
+
+                // If a top level response key is provided, grab the data that it contains.
+
+                $results = null;
+                if ( $responseKey !== null ) {
+                    if ( ! isset($response[$responseKey]) ) {
                         $this->logAndThrowException(
                             "Configured top-level response key '$responseKey' not found in response. "
                             . "Response keys are '" . implode(",", array_keys((array) $response)) . "'"
                         );
-                    }
-                } else {
-                    $response = $response->$responseKey;
-                }
-            }  // if ( $responseKey !== null )
-
-            // If a results key was specified, grab the response under that key.
-
-            $results = null;
-
-            if ( null !== $resultsKey ) {
-                if ( ! isset($response->$resultsKey) ) {
-                    if ( isset($response->$errorKey) ) {
-                        $this->logger->warning("Error querying {$this->currentUrl}");
-                        $this->logger->warning("Error response: " . print_r($response->$errorKey, true));
-                        if ( false === $this->setNextUrl($response, $nextKey) ) {
-                            break;
-                        }
-                        continue;
                     } else {
-                        $this->logAndThrowException(
-                            "Configured results key '$resultsKey' not found in response. "
-                            . "Response keys are '" . implode(",", array_keys((array) $response)) . "'\n" . print_r($response, true)
-                        );
+                        $results = $response[$responseKey];
                     }
                 } else {
-                    $results = $response->$resultsKey;
+                    $results = $response;
                 }
-            } else {
-                $results = $response;
-            }
 
-            $count = ( null !== $countKey && isset($response->$countKey) ? $response->$countKey : null );
+                if ( ! is_array($results) ) {
+                    $this->logAndThrowException("Request results is expected to be an array. Type returned was " . gettype($results));
+                } elseif ( 0 == count($results) ) {
+                    $this->logger->notice("Request returned an empty result set, skipping. url = {$this->currentUrl}");
 
-            // If no response/result key is specified then we need to convert to array
-            if ( is_object($results) ) {
-                $results = array($results);
-            }
-            // We assume that the response is an array of results, even if it is a single result.
+                    if ( false === $this->setNextUrl($response, $nextKey) ) {
+                        break;
+                    }
+                    continue;
+                }  // else ( 0 == count($results) )
 
-            if ( ! is_array($results) ) {
-                $this->logAndThrowException("Request results is expected to be an array. Type returned was " . gettype($results));
-            } elseif ( 0 == count($results) ) {
-                $this->logger->notice("Request returned an empty result set, skipping. url = {$this->currentUrl}");
+                // --------------------------------------------------------------------------------
+                // Perform some validation on the first pass through the result set.
+
+                if ( $first ) {
+
+                    $first = false;
+
+                    // On the first pass through, check the fields returned to be sure that they map to the
+                    // destination table columns. If the field map is not provided assume that the field names
+                    // are all keys in the response.
+
+                    $resultKeyNames = array_keys((array) $results[0]);
+
+                    $this->parseDestinationFieldMap($resultKeyNames, $this->sourceEndpoint);
+
+                    foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap ) {
+
+                        $destinationFields = array_keys($destFieldToSourceFieldMap);
+
+                        $destinationFieldIdToSourceFieldMap[$etlTableKey] = [];
+
+                        foreach ( array_values($destFieldToSourceFieldMap) as $index => $sourceField ){
+                            $destinationFieldIdToSourceFieldMap[$etlTableKey][$index] = $sourceField;
+                        }
+
+                        $destinationFields = $this->quoteIdentifierNames($destinationFields);
+                        $valuesComponents = array_fill(0, count($destinationFields), '?');
+
+                        $sql = sprintf(
+                            'INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
+                            $this->etlDestinationTableList[$etlTableKey]->getFullName(),
+                            implode(', ', $destinationFields),
+                            implode(', ', $valuesComponents),
+                            implode(', ', array_map(
+                                function ($destField) {
+                                    return "$destField = COALESCE(VALUES($destField), $destField)";
+                                },
+                                $destinationFields
+                            ))
+                        );
+
+                        try {
+                            $this->logger->debug(
+                                sprintf("Insert SQL for table key '%s':\n%s", $etlTableKey, $sql)
+                            );
+                            if ( ! $this->getEtlOverseerOptions()->isDryrun() ) {
+                                $insertStatements[$etlTableKey] = $this->destinationHandle->prepare($sql);
+                            }
+                        } catch (PDOException $e) {
+                            $this->logAndThrowException(
+                                "Error preparing insert statement for table key '$etlTableKey'",
+                                array('exception' => $e, 'endpoint' => $this)
+                            );
+                        }
+
+                    }
+
+                }  // if ( $first )
+
+                if ( $this->getEtlOverseerOptions()->isDryrun() ) {
+                    return $numRecords;
+                }
+
+                // Process each res$this->etlDestinationTableList[$table]->getFullName()ult
+                foreach ( $results as $result ) {
+
+                    foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap ) {
+
+                        $parsedValues = [];
+
+                        // Use the field map so that we can parse the values with their provided path ($resultKey)
+                        foreach ( $destFieldToSourceFieldMap[$etlTableKey] as $destField => $resultKey ) {
+                            $parsedValues[$destField] = $this->extractField($result, $resultKey);
+                        }
+
+                        $this->transform($parsedValues);
+
+                        $parameters = $this->generateParametersFromSourceRecord($parsedValues, $destinationFieldIdToSourceFieldMap[$etlTableKey]);
+
+                        try {
+                            $insertStatements[$etlTableKey]->execute($parameters);
+                        } catch (PDOException $e) {
+                            $this->logger->debug(print_r($result, true));
+                            $this->logAndThrowException(
+                                sprintf(
+                                    "Error inserting data into table key '%s' for url: '%s' on record %s.",
+                                    $etlTableKey,
+                                    $this->currentUrl,
+                                    $numRecords
+                                ),
+                                array('exception' => $e, 'endpoint' => $this)
+                            );
+                        }
+
+                        $numRecords++;
+
+                        $warning = $this->destinationHandle->query("SHOW WARNINGS");
+
+                        if ( count($warning) > 0 ) {
+                            $warnings = array_merge($warnings, $warning);
+                        }
+                    }
+                }
+
+                // Set up the next url using the "next" key or the source query values
 
                 if ( false === $this->setNextUrl($response, $nextKey) ) {
                     break;
                 }
-                continue;
-            }  // else ( 0 == count($results) )
 
-            // --------------------------------------------------------------------------------
-            // Perform some validation on the first pass through the result set.
+                $numRequestsMade++;
 
-            if ( $first ) {
+            }  // while ( false !== ( $retval = curl_exec($this->sourceHandle) ) )
+        } catch (Exception $e) {
+            $this->destinationHandle->rollback();
+            $this->logAndThrowException(
+                "Error committing transaction. Rolling back transaction.",
+                array('exception' => $e, 'endpoint' => $this)
+            );
+        }
 
-                if ( null !== $count ) {
-                    $this->logger->info("Ingesting $count records");
-                }
+        $this->destinationHandle->commit();
 
-                // On the first pass through, check the fields returned to be sure that they map to the
-                // destination table columns. If the field map is not provided assume that the field names
-                // are all keys in the response.
-
-                $resultKeyNames = array_keys((array) $results[0]);
-                if ( null === $fieldMap ) {
-                    $diff = array_diff($resultKeyNames, $this->destinationTableColumnNames);
-                    if ( 0 != count($diff) ) {
-                        $this->logAndThrowException("Result missing keys found in destination table: " . implode(",", $diff));
-                    }
-                }
-
-                // Create a mapping of result fields to database columns using the field map if provided or
-                // the result keys otherwise. A field map is recommended.
-
-                $columnToResultFieldMap = ( null !== $fieldMap
-                                            ? $fieldMap
-                                            : array_fill_keys($resultKeyNames, $resultKeyNames) );
-                $numColumns = count($columnToResultFieldMap);
-
-                $first = false;
-
-            }  // if ( $first )
-
-            // --------------------------------------------------------------------------------
-            // Process each result
-
-            $recordCounter = 0;
-            $valueList = array();  // PDO bind variables for the query
-            $queryParameters = array();  // PDO bind variables to value mapping for the query
-
-            foreach ( $results as $result ) {
-
-                $recordParameters = array();
-
-                // Potentially re-format the results if any processing directives were specified in the
-                // field map.
-
-                if ( 0 != count($this->responseDirectives) ) {
-                    foreach ( $this->responseDirectives as $resultKey => $directives ) {
-                        if ( isset($result->$resultKey) ) {
-                            try {
-                                $result->$resultKey = $this->applyDirectives($result->$resultKey, $directives);
-                            } catch ( Exception $e ) {
-                                // If a directive failed skip this result. The exception should have already been
-                                // logged.
-                                continue;
-                            }
-                        }
-                    }
-                }  // if ( 0 != count( $this->responseDirectives) )
-
-                // Build the database query parameters for this record by mapping the response keys to the
-                // correct database columns. What's really important is to match the order of the values
-                // with the columns in the insert's VALUE clause because the order of records returned can
-                // be arbitrary.
-
-                foreach ( $columnToResultFieldMap as $dbCol => $resultKey ) {
-                    $recordParameters[":{$dbCol}_{$recordCounter}"] = $this->extractField($result, $resultKey);
-                }
-
-                if ( $numColumns != count($recordParameters) ) {
-                    $this->logger->warning(
-                        "{$this} Record counts do not match (expected $numColumns but receieved "
-                        . count($recordParameters) . "). url = {$this->currentUrl}"
-                    );
-                }
-
-                $valueList[] = "(" . implode(", ", array_keys($recordParameters)) . ")";
-                $queryParameters = array_merge($queryParameters, $recordParameters);
-                $recordCounter++;
-
-            }  // foreach ( $results as $result )
-
-            reset($this->etlDestinationTableList);
-            $qualifiedDestTableName = current($this->etlDestinationTableList)->getFullName();
-
-            // The SQL can get long if processing a large result set so only display a small portion
-            $debugSql = "REPLACE INTO $qualifiedDestTableName (" .
-                implode(", ", array_keys($columnToResultFieldMap)) .
-                ") VALUES\n" . $valueList[0] . "\n...";
-
-            $this->logger->debug($debugSql);
-
-            $sql = "REPLACE INTO $qualifiedDestTableName (" .
-                implode(", ", array_keys($columnToResultFieldMap)) .
-                ") VALUES\n" . implode(",\n", $valueList);
-
-            $this->destinationHandle->execute($sql, $queryParameters);
-
-            $numRecordsProcessed += count($results);
-
-            if ( 0 == $numRecordsProcessed % $logCount ) {
-                $time = round(microtime(true) - $timeStart, 2);
-                $this->logger->info("Processed $numRecordsProcessed records ({$time}s per $logCount)");
-                $timeStart = microtime(true);
-            }
-
-            // Set up the next url using the "next" key or the source query values
-
-            if ( false === $this->setNextUrl($response, $nextKey) ) {
-                break;
-            }
-
-            $numRequestsMade++;
-
-        }  // while ( false !== ( $retval = curl_exec($this->sourceHandle) ) )
+        foreach ( $warnings as $message) {
+            $this->logSqlWarnings($message, $this->etlDestinationTableList[$table]->getFullName());
+        }
 
         if ( 0 != curl_errno($this->sourceHandle) ) {
             $this->logAndThrowException(curl_error($this->sourceHandle));
@@ -552,6 +445,46 @@ class RestIngestor extends aIngestor implements iAction
         return $numRecordsProcessed;
 
     }  // _execute()
+
+    /**
+     * Build up a parameter list suitable for an SQL query. The parameters must be in the proper
+     * order as expected by the field list of the query (this mapping information is stored in
+     * $destinationFieldIdToSourceFieldMap). Note that the same source value may be used multiple
+     * times in the query.
+     *
+     * @param $sourceRecord The current record from the source endpoint (must be Traversable but
+     *   may not explicitly implement Traversable such as an array or stdClass)
+     * @param array $destinationFieldIdToSourceFieldMap A mapping between the parameter position
+     *   (index) in the SQL statement and the source fields so we cam properly build the SQL
+     *   parameter list in the correct order.
+     *
+     * @return array A list of values to use as SQL parameters in the proper order corresponding
+     *   to the SQL query parameters.
+     */
+
+    private function generateParametersFromSourceRecord(
+        $sourceRecord,
+        array $destinationFieldIdToSourceFieldMap
+    ) {
+        $sourceFieldToValueMap = [];
+
+        // Build up the parameter list for the query. Note that the same source value may be
+        // used multiple times.
+
+        foreach ($sourceRecord as $sourceField => $sourceValue) {
+            $sourceFieldToValueMap[$sourceField] = $sourceValue;
+        }
+
+        // Map the values from the source record to the correct order in the parameter list
+
+        $parameters = [];
+        foreach ( $destinationFieldIdToSourceFieldMap as $index => $sourceField ) {
+            $parameters[$index] = $sourceFieldToValueMap[$sourceField];
+        }
+
+        return $parameters;
+
+    }  // generateParametersFromSourceRecord()
 
     /* ------------------------------------------------------------------------------------------
      * The REST ingestor supports request parameters specified in the definition file. Process these
@@ -622,25 +555,6 @@ class RestIngestor extends aIngestor implements iAction
         if ( 0 == count($this->restParameters) ) {
             return;
         }
-
-        // Apply any parameter transform/verify directives prior to setting the url.
-
-        if ( 0 != count($this->parameterDirectives) ) {
-            foreach ( $this->parameterDirectives as $parameter => $directives ) {
-                if ( ! array_key_exists($parameter, $this->restParameters) ) {
-                    continue;
-                }
-                try {
-                    $this->restParameters[$parameter] = $this->applyDirectives($this->restParameters[$parameter], $directives);
-                } catch ( Exception $e ) {
-                    $this->logger->error(
-                        "{$this} Parameter '$parameter' (" . $this->restParameters[$parameter]
-                        . ") failed processing directives, skipping."
-                    );
-                    return false;
-                }
-            }
-        }  // if ( 0 != count($this->responseDirectives) )
 
         if ( null !== $this->restRequestConfig && isset($this->restRequestConfig->format) ) {
 
@@ -749,278 +663,42 @@ class RestIngestor extends aIngestor implements iAction
 
     }  // setNextUrl()
 
-    /* ------------------------------------------------------------------------------------------
-     * Verify that transformation and validation directives are properly defined with a type, value,
-     * and any necessary formatting directives.  This will allow us to keep the apply() methods
-     * cleaner.
-     *
-     * @return true if the formatting is properly defined
-     * @throw Exception if there are malformed or unsupported formatting directives.
-     * ------------------------------------------------------------------------------------------
-     */
-
-    protected function verifyDirectives()
-    {
-        foreach ( $this->parameterDirectives as $parameter => $directives ) {
-
-            if ( isset($directives->transform) ) {
-                $transformList = ( is_array($directives->transform) ? $directives->transform : array($directives->transform) );
-                foreach ( $transformList as $directive ) {
-                    if ( ! is_object($directive) ) {
-                        $this->logAndThrowException("Transformation directives for '$parameter' must be an object");
-                    }
-                    $this->verifyTransformDirective($parameter, $directive);
-                }
-            }
-
-            if ( isset($directives->verify) ) {
-                $verifyList = ( is_array($directives->verify) ? $directives->verify : array($directives->verify) );
-                foreach ( $verifyList as $directive ) {
-                    if ( ! is_object($directive) ) {
-                        $this->logAndThrowException("Verification directives for '$parameter' must be an object");
-                    }
-                    $this->verifyVerifyDirective($parameter, $directive);
-                }
-            }
-
-        }  // foreach ( $this->parameterDirectives as $key => $directives )
-
-        foreach ( $this->responseDirectives as $key => $directives ) {
-
-            if ( isset($directives->transform) ) {
-                $transformList = ( is_array($directives->transform) ? $directives->transform : array($directives->transform) );
-                foreach ( $transformList as $directive ) {
-                    if ( ! is_object($directive) ) {
-                        $this->logAndThrowException("Transformation directives for '$key' must be an object");
-                    }
-                    $this->verifyTransformDirective($key, $directive);
-                }
-            }
-
-            if ( isset($directives->verify) ) {
-                $verifyList = ( is_array($directives->verify) ? $directives->verify : array($directives->verify) );
-                foreach ( $verifyList as $directive ) {
-                    if ( ! is_object($directive) ) {
-                        $this->logAndThrowException("Verification directives for '$key' must be an object");
-                    }
-                    $this->verifyVerifyDirective($key, $directive);
-                }
-            }
-
-        }  // foreach ( $this->parameterDirectives as $key => $directives )
-
-        return true;
-
-    }  //  verifyDirectives()
-
-    /* ------------------------------------------------------------------------------------------
-     * Verify transformation directives for a correctly formatted directive and attempty to verify the
-     * format if possible.
-     *
-     * @paramter $key The directive key (typically a parameter or response key)
-     * @parameter $directive A stdClass object containing the directive definition
-     *
-     * @return true if verification passed
-     *
-     * @throw Exception if verificaiton failed
-     * ------------------------------------------------------------------------------------------
-     */
-
-    protected function verifyTransformDirective($key, \stdClass $directive)
-    {
-        if ( ! isset($directive->type) || ! isset($directive->format) ) {
-            $this->logAndThrowException("Transform directive for '$key' must specify a type and format.");
-        }
-
-        switch ( $directive->type ) {
-            case 'datetime':
-                break;
-            case 'sprintf':
-                break;
-            case 'regex':
-                if ( false === preg_match($directive->format, "test") ) {
-                    $this->logAndThrowException("Invalid regex format '{$directive->format}' for key '$key'");
-                }
-                break;
-            default:
-                $this->logAndThrowException("Unsupported transform type '{$directive->type}' for key '$key'");
-                break;
-        }
-
-        return true;
-    }  // verifyTransformDirective()
-
-    /* ------------------------------------------------------------------------------------------
-     * Verify verificaiton directives for a correctly formatted directive and attempty to verify the
-     * format if possible.
-     *
-     * @paramter $key The directive key (typically a parameter or response key)
-     * @parameter $directive A stdClass object containing the directive definition
-     *
-     * @return true if verification passed
-     *
-     * @throw Exception if verificaiton failed
-     * ------------------------------------------------------------------------------------------
-     */
-
-    protected function verifyVerifyDirective($key, \stdClass $directive)
-    {
-        if ( ! isset($directive->type) || ! isset($directive->format) ) {
-            $this->logAndThrowException("Transform directive for '$key' must specify a type and format.");
-        }
-
-        switch ( $directive->type ) {
-            case 'regex':
-                if ( false === preg_match($directive->format, "test") ) {
-                    $this->logAndThrowException("Invalid regex format '{$directive->format}' for key '$key'");
-                }
-                break;
-            default:
-                $this->logAndThrowException("Unsupported transform type '{$directive->type}' for key '$key'");
-                break;
-        }
-
-        return true;
-    }  // verifyTransformDirective()
-
-    /* ------------------------------------------------------------------------------------------
-     * Apply directives, in order, to a value. Transformation directives are processed first followed
-     * by verification directives. Failed directives will throw an exception.
-     *
-     * @param $value The value to transform/verify
-     * @param $directives A stdClass object containing all of the directives
-     *
-     * @return The transformed value (unchanged if no transformation directives are present)
-     * ------------------------------------------------------------------------------------------
-     */
-
-    protected function applyDirectives($value, \stdClass $directives)
-    {
-        // Apply transform directives first, then verification directives
-
-        if ( isset($directives->transform) ) {
-            $transformList = ( is_array($directives->transform) ? $directives->transform : array($directives->transform) );
-            foreach ( $transformList as $directive ) {
-                $value = $this->applyTransformDirective($value, $directive);
-            }
-        }
-
-        if ( isset($directives->verify) ) {
-            $verifyList = ( is_array($directives->verify) ? $directives->verify : array($directives->verify) );
-            foreach ( $verifyList as $directive ) {
-                $this->applyVerifyDirective($value, $directive);
-            }
-        }
-
-        return $value;
-
-    }  // applyDirectives()
-
-    /* ------------------------------------------------------------------------------------------
-     * Apply individual transformation directives.
-     *
-     * @param $value The value to transform
-     * @param $directive A stdClass defining a single transformation directive
-     *
-     * @return The transformed value
-     *
-     * @throw Exception if one of the transformations failed.
-     * ------------------------------------------------------------------------------------------
-     */
-
-    protected function applyTransformDirective($value, \stdClass $directive)
-    {
-        switch ( $directive->type ) {
-            case 'datetime':
-                $value = date($directive->format, strtotime($value));
-                break;
-            case 'regex':
-                $matches = null;
-                $matched = preg_match($directive->format, $value, $matches);
-                if ( false === $matched ) {
-                    $this->logAndThrowException("Error transforming regex '{$directive->format}'");
-                } elseif ( 1 == $matched ) {
-                    $value = $matches[0];
-                }
-                break;
-            case 'sprintf':
-                $value = sprintf($directive->format, $value);
-                break;
-            default:
-                break;
-        }  // switch ( $directive->type )
-
-        return $value;
-
-    }  // applyTransformDirective()
-
-    /* ------------------------------------------------------------------------------------------
-     * Apply individual verification directives.
-     *
-     * @param $value The value to verify
-     * @param $directive A stdClass defining a single verificaiton directive
-     *
-     * @return true on success
-     *
-     * @throw Exception if one of the verifications failed.
-     * ------------------------------------------------------------------------------------------
-     */
-
-    protected function applyVerifyDirective($value, \stdClass $directive)
-    {
-        switch ( $directive->type ) {
-            case 'regex':
-                $matched = preg_match($directive->format, $value);
-                if ( 0 === $matched ) {
-                    $this->logAndThrowException("Failed {$directive->type} ({$directive->format}) verification for '$value'");
-                }
-                break;
-            default:
-                break;
-        }  // switch ( $directive->type )
-
-        return true;
-
-    }  // verifyTransformDirective()
-
      /* ------------------------------------------------------------------------------------------
-      * Parses PHP obj/array and retrieves desired field. Supports a wildcard, "?", for the last item in an array.
-      * @param string $data          PHP obj representing data.
-      * @param string $keys          Array of keys to parse
+      * Parses PHP obj/array and retrieves desired field.
+      * @param object $data          PHP obj representing data.
+      * @param array $path          Array of keys to parse as path to field.
       *
       * @return mixed
       * ------------------------------------------------------------------------------------------
       */
-    protected function extractField($data, $keys)
+    protected function extractField($data, $path)
     {
-        // Have this for cleaner ETL action defs.
-        // No need to put a single key in an array.
-        if (!is_array($keys)) {
-            $keys = array($keys);
+        if (empty($path)) {
+            $this->logger->warning("{$this->currentUrl} provided empty path to parse field.");
         }
 
-        foreach ($keys as $key) {
-            // We can only traverse if we currently have an array or object
-            if (!is_object($data) && !is_array($data)) {
+        $current = $data;
+
+        foreach ($path as $segment) {
+            if (is_object($current) && property_exists($current, $segment)) {
+                $current = $current->$segment;
+            } elseif (is_array($current) && array_key_exists($segment, $current)) {
+                $current = $current[$segment];
+            } else {
+                $this->logger->warning("{$this->currentUrl} cannot resolve $segment for path: $path");
                 return null;
             }
-
-            // Parse data object/array
-            if (is_array($data)) {
-                if (isset($data[$key])) {
-                    $data = $data[$key];
-                } else {
-                    return null;
-                }
-            } else {
-                if (isset($data->$key)) {
-                    $data = $data->$key;
-                } else {
-                    return null;
-                }
-            }
         }
 
-        return $data;
+        return $current;
     }
+
+    /* @see /ETL/Ingestor/pdoIngestor::transform() as this serves a similar purpose.
+     * This function is expected to be overriden to provide expanded functionality
+     * such as exploding values into multiple columns or multiple rows, or just
+     * formatting a value
+     */
+    protected function transform(array $srcRecord) {
+        return $srcRecord;
+    };
 }  // class RestIngestor
