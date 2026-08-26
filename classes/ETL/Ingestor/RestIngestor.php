@@ -79,15 +79,6 @@ class RestIngestor extends aIngestor implements iAction
 
         parent::initialize($etlOverseerOptions);
 
-        if ( ! $this->utilityEndpoint instanceof iRdbmsEndpoint ) {
-            $this->logAndThrowException(
-                sprintf(
-                    "Source endpoint %s does not implement ETL\\DataEndpoint\\iRdbmsEndpoint",
-                    get_class($this->sourceEndpoint)
-                )
-            );
-        }
-
         if ( ! $this->sourceEndpoint instanceof Rest ) {
             $this->logAndThrowException(
                 sprintf(
@@ -97,7 +88,18 @@ class RestIngestor extends aIngestor implements iAction
             );
         }
 
+
+        if ( ! $this->utilityEndpoint instanceof aRdbmsEndpoint ) {
+            $this->logAndThrowException(
+                sprintf(
+                    "Utility endpoint %s endpoint is not an instance of ETL\\DataEndpoint\\aRdbmsEndpoint",
+                    get_class($this->utilityEndpoint)
+                )
+            );
+        }
+
         $this->sourceEndpoint->connect();
+        $this->utilityEndpoint->connect();
 
         // If the source query is specified in the definition file use it to obtain parameters for the
         // rest call. For each record returned by the source query, add the returned columnms to the
@@ -181,6 +183,22 @@ class RestIngestor extends aIngestor implements iAction
 
         parent::performPreExecuteTasks();
 
+        // If any custom SQL fragments for insertion were specified, use them.
+
+        if ( isset($this->parsedDefinitionFile->custom_insert_values_components) ) {
+            $this->customInsertValuesComponents = $this->parsedDefinitionFile->custom_insert_values_components;
+            if ( ! is_object($this->customInsertValuesComponents) ) {
+                $this->logAndThrowException(
+                    sprintf(
+                        "custom_insert_values_components must be an object, %s given",
+                        gettype($this->customInsertValuesComponents)
+                    )
+                );
+            }
+        } else {
+            $this->customInsertValuesComponents = new stdClass();
+        }
+
         // If using a source query, execute it and prepare the result set
 
         if ( null !== $this->etlSourceQuery ) {
@@ -253,6 +271,7 @@ class RestIngestor extends aIngestor implements iAction
         $logCount = 10000;
         $first = true;
 
+        $numRecords = 0;
         $warnings = [];
 
         if(!$this->destinationHandle->beginTransaction()) {
@@ -262,9 +281,39 @@ class RestIngestor extends aIngestor implements iAction
             );
         }
 
-        $insertStatments = = [];
+        // The custom_insert_values_components option is an object that allows us to specify a
+        // subquery to use when inserting data rather than the raw source value. If the destination
+        // column is present as a key in the object, use the subquery, otherwise use "?" as a
+        // placeholder. Note that the raw value will be provided to the subquery and it should
+        // contain a single "?" placeholder.
+        //
+        // NOTE: Null values will not overwrite non-null values in the database. This is done to
+        // handle destinations that can be populated by multiple sources with varying levels of
+        // detail.
+
+        $customInsertValuesComponents = $this->customInsertValuesComponents;
+
+        // The destination field map may specify that the same source field is mapped to multiple
+        // destination fields and the order that the source record fields are returned may be
+        // different from the order the fields were specified in the map. For each destination
+        // table, maintain a mapping between the field position in the map (index) and the source
+        // fields so we cam properly build the SQL parameter list in the proper order. At the same
+        // time generate other data structures that will be needed later.
+
         $destinationFieldIdToSourceFieldMap = [];
-        $numRecords = 0;
+
+        // Templates for source field values containing pre-determined values such as variables or
+        // macros
+        $sourceFieldToValueMapTemplate = [];
+
+        // Scalar source fields that map to source fields
+        $simpleSourceFields = [];
+
+        // Complex source fields that must be evaluated by the source endpoint
+        $complexSourceFields = [];
+
+        // Variables or macros that will be substituted
+        $variableSourceFields = [];
 
         try {
             while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
@@ -320,7 +369,8 @@ class RestIngestor extends aIngestor implements iAction
                     // destination table columns. If the field map is not provided assume that the field names
                     // are all keys in the response.
 
-                    $resultKeyNames = array_keys((array) $results[0]);
+                    $firstRecord = $results[0];
+                    $resultKeyNames = array_keys($firstRecord);
 
                     $this->parseDestinationFieldMap($resultKeyNames, $this->sourceEndpoint);
 
@@ -328,14 +378,41 @@ class RestIngestor extends aIngestor implements iAction
 
                         $destinationFields = array_keys($destFieldToSourceFieldMap);
 
+                        // Create a mapping from the source fields to the all of the destination field indexes
+                        // they correspond to. At the same time, split the source fileds into lists of simple
+                        // and complex fields.
+
+                        $simpleSourceFields[$etlTableKey] = [];
+                        $complexSourceFields[$etlTableKey] = [];
+                        $variableSourceFields[$etlTableKey] = [];
+                        $destinationFieldIdToSourceFieldMap[$etlTableKey] = [];
+
                         $destinationFieldIdToSourceFieldMap[$etlTableKey] = [];
 
                         foreach ( array_values($destFieldToSourceFieldMap) as $index => $sourceField ){
                             $destinationFieldIdToSourceFieldMap[$etlTableKey][$index] = $sourceField;
+                            if (
+                                $this->sourceEndpoint->supportsComplexDataRecords()
+                                && $this->sourceEndpoint->isComplexSourceField($sourceField)
+                            ) {
+                                $complexSourceFields[$etlTableKey][] = $sourceField;
+                            } elseif ( Utilities::containsVariable($sourceField) ) {
+                                $variableSourceFields[$etlTableKey][] = $sourceField;
+                            } else {
+                                $simpleSourceFields[$etlTableKey][] = $sourceField;
+                            }
                         }
 
+                        $valuesComponents = array_map(
+                            function ($destField) use ($customInsertValuesComponents) {
+                                return ( property_exists($customInsertValuesComponents, $destField)
+                                         ? $customInsertValuesComponents->$destField
+                                         : '?' );
+                            },
+                            $destinationFields
+                        );
+
                         $destinationFields = $this->quoteIdentifierNames($destinationFields);
-                        $valuesComponents = array_fill(0, count($destinationFields), '?');
 
                         $sql = sprintf(
                             'INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
@@ -364,15 +441,78 @@ class RestIngestor extends aIngestor implements iAction
                             );
                         }
 
-                    }
+                        // If there are source fields that are variables or macros, evaluate them once here and
+                        // save them to a reusable template.
 
+                        $sourceFieldToValueMapTemplate[$etlTableKey] = [];
+
+                        if ( 0 != count($variableSourceFields[$etlTableKey]) ) {
+                            foreach ( $variableSourceFields[$etlTableKey] as $variable ) {
+                                $sourceFieldToValueMapTemplate[$etlTableKey][$variable] =
+                                    $this->variableStore->substitute($variable);
+                            }
+                        }
+                    } // foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap )
                 }  // if ( $first )
 
                 if ( $this->getEtlOverseerOptions()->isDryrun() ) {
                     return $numRecords;
                 }
 
-                // Process each res$this->etlDestinationTableList[$table]->getFullName()ult
+                // When the destination field map is auto-generated, only scalar source fields are used. If
+                // the source data is complex (e.g., JSON) we may end up with some complex fields in the
+                // source record (e.g., JSON objects as stdClass). Obviously, these cannot be used in the
+                // SQL parameter list but checking each field of each source record will reduce ingest
+                // performance.  Perform a on the first record to provide some sanity checking.
+
+                $invalidSourceValues = [];
+
+                foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap ) {
+                    $parameters = $this->generateParametersFromSourceRecord(
+                        $firstRecord,
+                        $destinationFieldIdToSourceFieldMap[$etlTableKey],
+                        $sourceFieldToValueMapTemplate[$etlTableKey],
+                        $simpleSourceFields[$etlTableKey],
+                        $complexSourceFields[$etlTableKey]
+                    );
+
+                    // Verify the parameters are scalars
+
+                    foreach ( $parameters as $index => $value ) {
+                        if ( null !== $value && ! is_scalar($value) ) {
+                            $sourceField = $destinationFieldIdToSourceFieldMap[$etlTableKey][$index];
+                            $invalidSourceValues[$etlTableKey][$sourceField] = $value;
+                        }
+                    }
+                }
+
+                if ( 0 != count($invalidSourceValues) ) {
+                    $this->logger->error(sprintf("First record:%s%s", PHP_EOL, print_r($firstRecord, true)));
+                    $this->logAndThrowException(
+                        sprintf(
+                            "Source record contains non-scalar values that cannot be used as SQL params. %s",
+                            implode('; ', array_map(
+                                function ($table, $invalidValues) {
+                                    return sprintf(
+                                        "Table '%s': %s",
+                                        $table,
+                                        implode(', ', array_map(
+                                            function ($k, $v) {
+                                                return sprintf("field '%s' = %s", $k, gettype($v));
+                                            },
+                                            array_keys($invalidValues),
+                                            $invalidValues
+                                        ))
+                                    );
+                                },
+                                array_keys($invalidSourceValues),
+                                $invalidSourceValues
+                            ))
+                        )
+                    );
+                }
+
+                // Process each result from Rest URL
                 foreach ( $results as $result ) {
 
                     foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap ) {
@@ -386,7 +526,13 @@ class RestIngestor extends aIngestor implements iAction
 
                         $this->transform($parsedValues);
 
-                        $parameters = $this->generateParametersFromSourceRecord($parsedValues, $destinationFieldIdToSourceFieldMap[$etlTableKey]);
+                        $parameters = $this->generateParametersFromSourceRecord(
+                            $parsedValues,
+                            $destinationFieldIdToSourceFieldMap[$etlTableKey],
+                            $sourceFieldToValueMapTemplate[$etlTableKey],
+                            $simpleSourceFields[$etlTableKey],
+                            $complexSourceFields[$etlTableKey]
+                        );
 
                         try {
                             $insertStatements[$etlTableKey]->execute($parameters);
@@ -457,6 +603,11 @@ class RestIngestor extends aIngestor implements iAction
      * @param array $destinationFieldIdToSourceFieldMap A mapping between the parameter position
      *   (index) in the SQL statement and the source fields so we cam properly build the SQL
      *   parameter list in the correct order.
+     * @param array $sourceTemplate Templates for source field values containing pre-determined
+     *   values such as variables or macros.
+     * @param array $simpleSourceFields Scalar source fields that map to source fields.
+     * @param array $complexSourceFields Complex source fields that must be evaluated by the source
+     *   endpoint
      *
      * @return array A list of values to use as SQL parameters in the proper order corresponding
      *   to the SQL query parameters.
@@ -464,20 +615,33 @@ class RestIngestor extends aIngestor implements iAction
 
     private function generateParametersFromSourceRecord(
         $sourceRecord,
-        array $destinationFieldIdToSourceFieldMap
+        array $destinationFieldIdToSourceFieldMap,
+        array $sourceTemplate,
+        array $simpleSourceFields,
+        array $complexSourceFields
     ) {
-        $sourceFieldToValueMap = [];
+        $sourceFieldToValueMap = $sourceTemplate;
 
         // Build up the parameter list for the query. Note that the same source value may be
         // used multiple times.
 
         foreach ($sourceRecord as $sourceField => $sourceValue) {
-            $sourceFieldToValueMap[$sourceField] = $sourceValue;
+            if ( in_array($sourceField, $simpleSourceFields) ) {
+                $sourceFieldToValueMap[$sourceField] = $sourceValue;
+            }
+        }
+
+        // If this source endpoint does not support complex fields this loop won't be
+        // processed because no fields will have been identified as complex.
+
+        foreach ( $complexSourceFields as $sourceField ) {
+            $sourceFieldToValueMap[$sourceField] =
+                $this->sourceEndpoint->evaluateComplexSourceField($sourceField, $sourceRecord);
         }
 
         // Map the values from the source record to the correct order in the parameter list
 
-        $parameters = [];
+        $parameters = array();
         foreach ( $destinationFieldIdToSourceFieldMap as $index => $sourceField ) {
             $parameters[$index] = $sourceFieldToValueMap[$sourceField];
         }
@@ -700,5 +864,5 @@ class RestIngestor extends aIngestor implements iAction
      */
     protected function transform(array $srcRecord) {
         return $srcRecord;
-    };
+    }
 }  // class RestIngestor
