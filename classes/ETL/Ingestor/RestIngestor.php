@@ -310,7 +310,6 @@ class RestIngestor extends StructuredFileIngestor implements iAction
             }
 
             fclose($fp);
-            break;
 
             // Set up the next url using the "next" key or the source query values
 
@@ -341,10 +340,7 @@ class RestIngestor extends StructuredFileIngestor implements iAction
     {
         $this->executeRestCalls();
         parent::_execute();
-
-        if ($this->restIngestDir) {
-            //array_map('unlink', glob($this->restIngestDir . '/*.json'));
-        }
+        $this->sourceEndpoint->cleanUpDirectory();
     }  // _execute()
 
     /* ------------------------------------------------------------------------------------------
