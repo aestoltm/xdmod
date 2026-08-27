@@ -250,7 +250,6 @@ class RestIngestor extends StructuredFileIngestor implements iAction
         $first = true;
 
         $numRecords = 0;
-        $warnings = [];
 
         while ( false !== ( $retval = curl_exec($this->utilityHandle) ) ) {
 
@@ -301,7 +300,7 @@ class RestIngestor extends StructuredFileIngestor implements iAction
             $jsonFile = $file . '.json';
             rename($file, $jsonFile);
 
-            if  ( ($fp = fopen($jsonFile, 'w')) === false) {
+            if ( ($fp = fopen($jsonFile, 'w')) === false) {
                 $this->logAndThrowException("Could not open $jsonFile");
             }
 
