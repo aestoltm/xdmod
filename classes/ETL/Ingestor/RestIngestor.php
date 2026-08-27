@@ -523,35 +523,4 @@ class RestIngestor extends StructuredFileIngestor implements iAction
         return true;
 
     }  // setNextUrl()
-
-     /* ------------------------------------------------------------------------------------------
-      * Parses PHP obj/array and retrieves desired field.
-      * @param object $data          PHP obj representing data.
-      * @param array $path          Array of keys to parse as path to field.
-      *
-      * @return mixed
-      * ------------------------------------------------------------------------------------------
-      */
-    protected function extractField($data, $path)
-    {
-        if (empty($path)) {
-            $this->logger->warning("{$this->currentUrl} provided empty path to parse field.");
-        }
-
-        $current = $data;
-
-        foreach ($path as $segment) {
-            if (is_object($current) && property_exists($current, $segment)) {
-                $current = $current->$segment;
-            } elseif (is_array($current) && array_key_exists($segment, $current)) {
-                $current = $current[$segment];
-            } else {
-                $this->logger->warning("{$this->currentUrl} cannot resolve $segment for path: $path");
-                return null;
-            }
-        }
-
-        return $current;
-    }
-
 }  // class RestIngestor
