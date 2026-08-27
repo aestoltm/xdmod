@@ -25,7 +25,7 @@ use PDO;
 use Exception;
 use Psr\Log\LoggerInterface;
 
-class RestIngestor extends aIngestor implements iAction
+class RestIngestor extends StructuredFileIngestor implements iAction
 {
     // Parsed configuration options for REST request handling
     protected $restRequestConfig = null;
@@ -49,6 +49,12 @@ class RestIngestor extends aIngestor implements iAction
     // This action does not (yet) support multiple destination tables. If multiple destination
     // tables are present, store the first here and use it.
     protected $etlDestinationTable = null;
+
+    // Rest parameter helper endpoint
+    protected $parameterEndpoint = null;
+
+    // Rest results directory
+    protected $restIngestDir = null;
 
     /* ------------------------------------------------------------------------------------------
      * Set up data endpoints and other options.
@@ -79,26 +85,17 @@ class RestIngestor extends aIngestor implements iAction
 
         parent::initialize($etlOverseerOptions);
 
-        if ( ! $this->sourceEndpoint instanceof Rest ) {
+        $this->restIngestDir = $this->sourceEndpoint->getPath();
+
+        if ( ! $this->utilityEndpoint instanceof Rest ) {
             $this->logAndThrowException(
                 sprintf(
-                    "Source endpoint %s does not implement ETL\\DataEndpoint\\Rest",
-                    get_class($this->sourceEndpoint)
-                )
-            );
-        }
-
-
-        if ( ! $this->utilityEndpoint instanceof aRdbmsEndpoint ) {
-            $this->logAndThrowException(
-                sprintf(
-                    "Utility endpoint %s endpoint is not an instance of ETL\\DataEndpoint\\aRdbmsEndpoint",
+                    "Utility endpoint %s does not implement ETL\\DataEndpoint\\Rest",
                     get_class($this->utilityEndpoint)
                 )
             );
         }
 
-        $this->sourceEndpoint->connect();
         $this->utilityEndpoint->connect();
 
         // If the source query is specified in the definition file use it to obtain parameters for the
@@ -107,15 +104,17 @@ class RestIngestor extends aIngestor implements iAction
 
         if ( null === $this->etlSourceQuery && isset($this->parsedDefinitionFile->source_query) ) {
             $this->logger->debug("Create ETL source query object");
+            $this->parameterEndpoint = $this->utilityEndpoint->getRestParameterEndpoint();
+            $this->parameterEndpoint->connect();
             $this->etlSourceQuery = new Query(
                 $this->parsedDefinitionFile->source_query,
-                $this->utilityEndpoint->getSystemQuoteChar(),
+                $this->parameterEndpoint->getSystemQuoteChar(),
                 $this->logger
             );
 
             // If supported by the source query, set the date ranges here.
 
-            $this->getEtlOverseerOptions()->applyOverseerRestrictions($this->etlSourceQuery, $this->utilityEndpoint, $this);
+            $this->getEtlOverseerOptions()->applyOverseerRestrictions($this->etlSourceQuery, $this->parameterEndpoint, $this);
 
         }  // if ( null === $this->etlSourceQuery && isset($this->parsedDefinitionFile->source_query) )
 
@@ -183,22 +182,6 @@ class RestIngestor extends aIngestor implements iAction
 
         parent::performPreExecuteTasks();
 
-        // If any custom SQL fragments for insertion were specified, use them.
-
-        if ( isset($this->parsedDefinitionFile->custom_insert_values_components) ) {
-            $this->customInsertValuesComponents = $this->parsedDefinitionFile->custom_insert_values_components;
-            if ( ! is_object($this->customInsertValuesComponents) ) {
-                $this->logAndThrowException(
-                    sprintf(
-                        "custom_insert_values_components must be an object, %s given",
-                        gettype($this->customInsertValuesComponents)
-                    )
-                );
-            }
-        } else {
-            $this->customInsertValuesComponents = new stdClass();
-        }
-
         // If using a source query, execute it and prepare the result set
 
         if ( null !== $this->etlSourceQuery ) {
@@ -209,7 +192,8 @@ class RestIngestor extends aIngestor implements iAction
             );
 
             $this->logger->debug("REST source query:\n$sql");
-            $this->etlSourceQueryResult = $this->utilityHandle->query($sql, array(), true);
+            $handle = $this->parameterEndpoint->getHandle();
+            $this->etlSourceQueryResult = $handle->query($sql, array(), true);
 
             if ( 0 == $this->etlSourceQueryResult->rowCount() ) {
                 $this->logger->warning("{$this} Source query return 0 rows, exiting");
@@ -225,13 +209,7 @@ class RestIngestor extends aIngestor implements iAction
 
     }  // performPreExecuteTasks()
 
-    /* ------------------------------------------------------------------------------------------
-     * @see aIngestor::_execute()
-     * ------------------------------------------------------------------------------------------
-     */
-
-     // @codingStandardsIgnoreLine
-    protected function _execute()
+    private function executeRestCalls()
     {
         // Support a source query, mapping from the source to rest parameters, rest field map
         $requestHeaders = ( isset($this->restRequestConfig->requestHeaders) ? (array) $this->restRequestConfig->requestHeaders : [] );
@@ -257,9 +235,9 @@ class RestIngestor extends aIngestor implements iAction
         $this->setRestUrlWithParameters();
 
         // Keep the current url for logging
-        $this->currentUrl = curl_getinfo($this->sourceHandle, CURLINFO_EFFECTIVE_URL);
+        $this->currentUrl = curl_getinfo($this->utilityHandle, CURLINFO_EFFECTIVE_URL);
 
-        curl_setopt($this->sourceHandle, CURLOPT_HTTPHEADER, $requestHeaders);
+        curl_setopt($this->utilityHandle, CURLOPT_HTTPHEADER, $requestHeaders);
 
         $this->logger->info("REST url: {$this->currentUrl}");
 
@@ -274,381 +252,100 @@ class RestIngestor extends aIngestor implements iAction
         $numRecords = 0;
         $warnings = [];
 
-        if(!$this->destinationHandle->beginTransaction()) {
-            $this->logAndThrowException(
-                "Could not start transaction. Skipping ingestion.",
-                ['endpoint' => $this]
-            );
-        }
+        while ( false !== ( $retval = curl_exec($this->utilityHandle) ) ) {
 
-        // The custom_insert_values_components option is an object that allows us to specify a
-        // subquery to use when inserting data rather than the raw source value. If the destination
-        // column is present as a key in the object, use the subquery, otherwise use "?" as a
-        // placeholder. Note that the raw value will be provided to the subquery and it should
-        // contain a single "?" placeholder.
-        //
-        // NOTE: Null values will not overwrite non-null values in the database. This is done to
-        // handle destinations that can be populated by multiple sources with varying levels of
-        // detail.
+            if ( 0 !== curl_errno($this->utilityHandle) ) {
+                $this->logAndThrowException("${this} Error during REST call: " . curl_error($this->utilityHandle));
+            }
 
-        $customInsertValuesComponents = $this->customInsertValuesComponents;
+            $response = json_decode($retval);
 
-        // The destination field map may specify that the same source field is mapped to multiple
-        // destination fields and the order that the source record fields are returned may be
-        // different from the order the fields were specified in the map. For each destination
-        // table, maintain a mapping between the field position in the map (index) and the source
-        // fields so we cam properly build the SQL parameter list in the proper order. At the same
-        // time generate other data structures that will be needed later.
+            if ( null === $response || ! is_object($response) ) {
+                $this->logAndThrowException("{$this} Response is not an array: $retval");
+            }
 
-        $destinationFieldIdToSourceFieldMap = [];
+            // --------------------------------------------------------------------------------
+            // Identify the various parts of the response based on the configuration and verify them
 
-        // Templates for source field values containing pre-determined values such as variables or
-        // macros
-        $sourceFieldToValueMapTemplate = [];
+            // If a top level response key is provided, grab the data that it contains.
 
-        // Scalar source fields that map to source fields
-        $simpleSourceFields = [];
-
-        // Complex source fields that must be evaluated by the source endpoint
-        $complexSourceFields = [];
-
-        // Variables or macros that will be substituted
-        $variableSourceFields = [];
-
-        try {
-            while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
-
-                if ( 0 !== curl_errno($this->sourceHandle) ) {
-                    $this->logger->logAndThrowException("${this} Error during REST call: " . curl_error($this->sourceHandle));
-                }
-
-                $response = json_decode($retval, true);
-
-                if ( null === $response || ! is_array($response) ) {
-                    $this->logger->logAndThrowException("{$this} Response is not an array: $retval");
-                }
-
-                // --------------------------------------------------------------------------------
-                // Identify the various parts of the response based on the configuration and verify them
-
-                // If a top level response key is provided, grab the data that it contains.
-
-                $results = null;
-                if ( $responseKey !== null ) {
-                    if ( ! isset($response[$responseKey]) ) {
-                        $this->logAndThrowException(
-                            "Configured top-level response key '$responseKey' not found in response. "
-                            . "Response keys are '" . implode(",", array_keys((array) $response)) . "'"
-                        );
-                    } else {
-                        $results = $response[$responseKey];
-                    }
-                } else {
-                    $results = $response;
-                }
-
-                if ( ! is_array($results) ) {
-                    $this->logAndThrowException("Request results is expected to be an array. Type returned was " . gettype($results));
-                } elseif ( 0 == count($results) ) {
-                    $this->logger->notice("Request returned an empty result set, skipping. url = {$this->currentUrl}");
-
-                    if ( false === $this->setNextUrl($response, $nextKey) ) {
-                        break;
-                    }
-                    continue;
-                }  // else ( 0 == count($results) )
-
-                // --------------------------------------------------------------------------------
-                // Perform some validation on the first pass through the result set.
-
-                if ( $first ) {
-
-                    $first = false;
-
-                    // On the first pass through, check the fields returned to be sure that they map to the
-                    // destination table columns. If the field map is not provided assume that the field names
-                    // are all keys in the response.
-
-                    $firstRecord = $results[0];
-                    $resultKeyNames = array_keys($firstRecord);
-
-                    $this->parseDestinationFieldMap($resultKeyNames, $this->sourceEndpoint);
-
-                    foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap ) {
-
-                        $destinationFields = array_keys($destFieldToSourceFieldMap);
-
-                        // Create a mapping from the source fields to the all of the destination field indexes
-                        // they correspond to. At the same time, split the source fileds into lists of simple
-                        // and complex fields.
-
-                        $simpleSourceFields[$etlTableKey] = [];
-                        $complexSourceFields[$etlTableKey] = [];
-                        $variableSourceFields[$etlTableKey] = [];
-                        $destinationFieldIdToSourceFieldMap[$etlTableKey] = [];
-
-                        $destinationFieldIdToSourceFieldMap[$etlTableKey] = [];
-
-                        foreach ( array_values($destFieldToSourceFieldMap) as $index => $sourceField ){
-                            $destinationFieldIdToSourceFieldMap[$etlTableKey][$index] = $sourceField;
-                            if (
-                                $this->sourceEndpoint->supportsComplexDataRecords()
-                                && $this->sourceEndpoint->isComplexSourceField($sourceField)
-                            ) {
-                                $complexSourceFields[$etlTableKey][] = $sourceField;
-                            } elseif ( Utilities::containsVariable($sourceField) ) {
-                                $variableSourceFields[$etlTableKey][] = $sourceField;
-                            } else {
-                                $simpleSourceFields[$etlTableKey][] = $sourceField;
-                            }
-                        }
-
-                        $valuesComponents = array_map(
-                            function ($destField) use ($customInsertValuesComponents) {
-                                return ( property_exists($customInsertValuesComponents, $destField)
-                                         ? $customInsertValuesComponents->$destField
-                                         : '?' );
-                            },
-                            $destinationFields
-                        );
-
-                        $destinationFields = $this->quoteIdentifierNames($destinationFields);
-
-                        $sql = sprintf(
-                            'INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
-                            $this->etlDestinationTableList[$etlTableKey]->getFullName(),
-                            implode(', ', $destinationFields),
-                            implode(', ', $valuesComponents),
-                            implode(', ', array_map(
-                                function ($destField) {
-                                    return "$destField = COALESCE(VALUES($destField), $destField)";
-                                },
-                                $destinationFields
-                            ))
-                        );
-
-                        try {
-                            $this->logger->debug(
-                                sprintf("Insert SQL for table key '%s':\n%s", $etlTableKey, $sql)
-                            );
-                            if ( ! $this->getEtlOverseerOptions()->isDryrun() ) {
-                                $insertStatements[$etlTableKey] = $this->destinationHandle->prepare($sql);
-                            }
-                        } catch (PDOException $e) {
-                            $this->logAndThrowException(
-                                "Error preparing insert statement for table key '$etlTableKey'",
-                                array('exception' => $e, 'endpoint' => $this)
-                            );
-                        }
-
-                        // If there are source fields that are variables or macros, evaluate them once here and
-                        // save them to a reusable template.
-
-                        $sourceFieldToValueMapTemplate[$etlTableKey] = [];
-
-                        if ( 0 != count($variableSourceFields[$etlTableKey]) ) {
-                            foreach ( $variableSourceFields[$etlTableKey] as $variable ) {
-                                $sourceFieldToValueMapTemplate[$etlTableKey][$variable] =
-                                    $this->variableStore->substitute($variable);
-                            }
-                        }
-                    } // foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap )
-                }  // if ( $first )
-
-                if ( $this->getEtlOverseerOptions()->isDryrun() ) {
-                    return $numRecords;
-                }
-
-                // When the destination field map is auto-generated, only scalar source fields are used. If
-                // the source data is complex (e.g., JSON) we may end up with some complex fields in the
-                // source record (e.g., JSON objects as stdClass). Obviously, these cannot be used in the
-                // SQL parameter list but checking each field of each source record will reduce ingest
-                // performance.  Perform a on the first record to provide some sanity checking.
-
-                $invalidSourceValues = [];
-
-                foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap ) {
-                    $parameters = $this->generateParametersFromSourceRecord(
-                        $firstRecord,
-                        $destinationFieldIdToSourceFieldMap[$etlTableKey],
-                        $sourceFieldToValueMapTemplate[$etlTableKey],
-                        $simpleSourceFields[$etlTableKey],
-                        $complexSourceFields[$etlTableKey]
-                    );
-
-                    // Verify the parameters are scalars
-
-                    foreach ( $parameters as $index => $value ) {
-                        if ( null !== $value && ! is_scalar($value) ) {
-                            $sourceField = $destinationFieldIdToSourceFieldMap[$etlTableKey][$index];
-                            $invalidSourceValues[$etlTableKey][$sourceField] = $value;
-                        }
-                    }
-                }
-
-                if ( 0 != count($invalidSourceValues) ) {
-                    $this->logger->error(sprintf("First record:%s%s", PHP_EOL, print_r($firstRecord, true)));
+            $results = null;
+            if ( $responseKey !== null ) {
+                if ( ! isset($response->$responseKey) ) {
                     $this->logAndThrowException(
-                        sprintf(
-                            "Source record contains non-scalar values that cannot be used as SQL params. %s",
-                            implode('; ', array_map(
-                                function ($table, $invalidValues) {
-                                    return sprintf(
-                                        "Table '%s': %s",
-                                        $table,
-                                        implode(', ', array_map(
-                                            function ($k, $v) {
-                                                return sprintf("field '%s' = %s", $k, gettype($v));
-                                            },
-                                            array_keys($invalidValues),
-                                            $invalidValues
-                                        ))
-                                    );
-                                },
-                                array_keys($invalidSourceValues),
-                                $invalidSourceValues
-                            ))
-                        )
+                        "Configured top-level response key '$responseKey' not found in response. "
+                        . "Response keys are '" . implode(",", array_keys((array) $response)) . "'"
                     );
+                } else {
+                    $results = $response->$responseKey;
                 }
+            } else {
+                $results = $response;
+            }
 
-                // Process each result from Rest URL
-                foreach ( $results as $result ) {
-
-                    foreach ( $this->destinationFieldMappings as $etlTableKey => $destFieldToSourceFieldMap ) {
-
-                        $parsedValues = [];
-
-                        // Use the field map so that we can parse the values with their provided path ($resultKey)
-                        foreach ( $destFieldToSourceFieldMap[$etlTableKey] as $destField => $resultKey ) {
-                            $parsedValues[$destField] = $this->extractField($result, $resultKey);
-                        }
-
-                        $this->transform($parsedValues);
-
-                        $parameters = $this->generateParametersFromSourceRecord(
-                            $parsedValues,
-                            $destinationFieldIdToSourceFieldMap[$etlTableKey],
-                            $sourceFieldToValueMapTemplate[$etlTableKey],
-                            $simpleSourceFields[$etlTableKey],
-                            $complexSourceFields[$etlTableKey]
-                        );
-
-                        try {
-                            $insertStatements[$etlTableKey]->execute($parameters);
-                        } catch (PDOException $e) {
-                            $this->logger->debug(print_r($result, true));
-                            $this->logAndThrowException(
-                                sprintf(
-                                    "Error inserting data into table key '%s' for url: '%s' on record %s.",
-                                    $etlTableKey,
-                                    $this->currentUrl,
-                                    $numRecords
-                                ),
-                                array('exception' => $e, 'endpoint' => $this)
-                            );
-                        }
-
-                        $numRecords++;
-
-                        $warning = $this->destinationHandle->query("SHOW WARNINGS");
-
-                        if ( count($warning) > 0 ) {
-                            $warnings = array_merge($warnings, $warning);
-                        }
-                    }
-                }
-
-                // Set up the next url using the "next" key or the source query values
+            if ( empty($results) ) {
+                $this->logger->notice("Request returned an empty result set, skipping. url = {$this->currentUrl}");
 
                 if ( false === $this->setNextUrl($response, $nextKey) ) {
                     break;
                 }
+                continue;
+            }  // else ( 0 == count($results) )
 
-                $numRequestsMade++;
+            if ( ($file = tempnam($this->restIngestDir, 'xdmod-rest-ingestor-')) === false ) {
+                $this->logAndThrowException("Could not create JSON file, $file, for REST results");
+            }
 
-            }  // while ( false !== ( $retval = curl_exec($this->sourceHandle) ) )
-        } catch (Exception $e) {
-            $this->destinationHandle->rollback();
-            $this->logAndThrowException(
-                "Error committing transaction. Rolling back transaction.",
-                array('exception' => $e, 'endpoint' => $this)
-            );
-        }
+            chmod($file, 0666);
 
-        $this->destinationHandle->commit();
+            $jsonFile = $file . '.json';
+            rename($file, $jsonFile);
 
-        foreach ( $warnings as $message) {
-            $this->logSqlWarnings($message, $this->etlDestinationTableList[$table]->getFullName());
-        }
+            if  ( ($fp = fopen($jsonFile, 'w')) === false) {
+                $this->logAndThrowException("Could not open $jsonFile");
+            }
 
-        if ( 0 != curl_errno($this->sourceHandle) ) {
-            $this->logAndThrowException(curl_error($this->sourceHandle));
+            if (fwrite($fp, json_encode($results)) === 0) {
+                $this->logAndThrowException("Write failed to $jsonFile");
+            }
+
+            fclose($fp);
+            break;
+
+            // Set up the next url using the "next" key or the source query values
+
+            if ( false === $this->setNextUrl($response, $nextKey) ) {
+                break;
+            }
+
+            $numRequestsMade++;
+
+        }  // while ( false !== ( $retval = curl_exec($this->utilityHandle) ) )
+
+        if ( 0 != curl_errno($this->utilityHandle) ) {
+            $this->logAndThrowException(curl_error($this->utilityHandle));
         }
 
         $this->logger->info("Made $numRequestsMade REST requests");
 
         return $numRecordsProcessed;
+    }
 
-    }  // _execute()
-
-    /**
-     * Build up a parameter list suitable for an SQL query. The parameters must be in the proper
-     * order as expected by the field list of the query (this mapping information is stored in
-     * $destinationFieldIdToSourceFieldMap). Note that the same source value may be used multiple
-     * times in the query.
-     *
-     * @param $sourceRecord The current record from the source endpoint (must be Traversable but
-     *   may not explicitly implement Traversable such as an array or stdClass)
-     * @param array $destinationFieldIdToSourceFieldMap A mapping between the parameter position
-     *   (index) in the SQL statement and the source fields so we cam properly build the SQL
-     *   parameter list in the correct order.
-     * @param array $sourceTemplate Templates for source field values containing pre-determined
-     *   values such as variables or macros.
-     * @param array $simpleSourceFields Scalar source fields that map to source fields.
-     * @param array $complexSourceFields Complex source fields that must be evaluated by the source
-     *   endpoint
-     *
-     * @return array A list of values to use as SQL parameters in the proper order corresponding
-     *   to the SQL query parameters.
+    /* ------------------------------------------------------------------------------------------
+     * @see aIngestor::_execute()
+     * ------------------------------------------------------------------------------------------
      */
 
-    private function generateParametersFromSourceRecord(
-        $sourceRecord,
-        array $destinationFieldIdToSourceFieldMap,
-        array $sourceTemplate,
-        array $simpleSourceFields,
-        array $complexSourceFields
-    ) {
-        $sourceFieldToValueMap = $sourceTemplate;
+     // @codingStandardsIgnoreLine
+    protected function _execute()
+    {
+        $this->executeRestCalls();
+        parent::_execute();
 
-        // Build up the parameter list for the query. Note that the same source value may be
-        // used multiple times.
-
-        foreach ($sourceRecord as $sourceField => $sourceValue) {
-            if ( in_array($sourceField, $simpleSourceFields) ) {
-                $sourceFieldToValueMap[$sourceField] = $sourceValue;
-            }
+        if ($this->restIngestDir) {
+            //array_map('unlink', glob($this->restIngestDir . '/*.json'));
         }
-
-        // If this source endpoint does not support complex fields this loop won't be
-        // processed because no fields will have been identified as complex.
-
-        foreach ( $complexSourceFields as $sourceField ) {
-            $sourceFieldToValueMap[$sourceField] =
-                $this->sourceEndpoint->evaluateComplexSourceField($sourceField, $sourceRecord);
-        }
-
-        // Map the values from the source record to the correct order in the parameter list
-
-        $parameters = array();
-        foreach ( $destinationFieldIdToSourceFieldMap as $index => $sourceField ) {
-            $parameters[$index] = $sourceFieldToValueMap[$sourceField];
-        }
-
-        return $parameters;
-
-    }  // generateParametersFromSourceRecord()
+    }  // _execute()
 
     /* ------------------------------------------------------------------------------------------
      * The REST ingestor supports request parameters specified in the definition file. Process these
@@ -758,8 +455,8 @@ class RestIngestor extends aIngestor implements iAction
             $queryString = "?" . implode("&", $parameters);
         }
 
-        $this->currentUrl = $newUrl = $this->sourceEndpoint->getBaseUrl() . $queryString;
-        curl_setopt($this->sourceHandle, CURLOPT_URL, $newUrl);
+        $this->currentUrl = $newUrl = $this->utilityEndpoint->getBaseUrl() . $queryString;
+        curl_setopt($this->utilityHandle, CURLOPT_URL, $newUrl);
 
         return $this;
 
@@ -810,7 +507,7 @@ class RestIngestor extends aIngestor implements iAction
                 return false;
             } else {
                 $this->currentUrl = $response->$nextKey;
-                curl_setopt($this->sourceHandle, CURLOPT_URL, $response->$nextKey);
+                curl_setopt($this->utilityHandle, CURLOPT_URL, $response->$nextKey);
             }
         } else {
             // No next key and no source query
@@ -819,8 +516,8 @@ class RestIngestor extends aIngestor implements iAction
 
         $this->logger->debug("REST url: {$this->currentUrl}");
 
-        if ( null !== $this->sourceEndpoint->getSleepMicroseconds() ) {
-            usleep($this->sourceEndpoint->getSleepMicroseconds());
+        if ( null !== $this->utilityEndpoint->getSleepMicroseconds() ) {
+            usleep($this->utilityEndpoint->getSleepMicroseconds());
         }
 
         return true;
@@ -857,12 +554,4 @@ class RestIngestor extends aIngestor implements iAction
         return $current;
     }
 
-    /* @see /ETL/Ingestor/pdoIngestor::transform() as this serves a similar purpose.
-     * This function is expected to be overriden to provide expanded functionality
-     * such as exploding values into multiple columns or multiple rows, or just
-     * formatting a value
-     */
-    protected function transform(array $srcRecord) {
-        return $srcRecord;
-    }
 }  // class RestIngestor
