@@ -295,7 +295,7 @@ class RestIngestor extends StructuredFileIngestor implements iAction
                 $this->logAndThrowException("Could not create JSON file, $file, for REST results");
             }
 
-            chmod($file, 0666);
+            chmod($file, 0644);
 
             $jsonFile = $file . '.json';
             rename($file, $jsonFile);
