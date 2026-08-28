@@ -249,8 +249,6 @@ class RestIngestor extends StructuredFileIngestor implements iAction
         $logCount = 10000;
         $first = true;
 
-        $numRecords = 0;
-
         while ( false !== ( $retval = curl_exec($this->utilityHandle) ) ) {
 
             if ( 0 !== curl_errno($this->utilityHandle) ) {
