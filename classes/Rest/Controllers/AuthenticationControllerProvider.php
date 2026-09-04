@@ -156,7 +156,7 @@ class AuthenticationControllerProvider extends BaseControllerProvider
     }
 
     /**
-     * Login via JWT. Behaves silmilar to this::Login()
+     * Login via JWT. Behaves silmilar to self::Login()
      *
      * @param Request $request that will be used to retrieve the user
      * @param Application $app used to facilitate json encoding the response.
