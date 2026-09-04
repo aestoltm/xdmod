@@ -114,7 +114,7 @@ class JsonWebToken
         // Create a cache item pool (can be any PSR-6 compatible cache item pool)
         $cacheItemPool = Phpfastcache\CacheManager::getInstance('files');
 
-        $keySet = new CachedKeySet(
+        return new CachedKeySet(
             $jwksUri,
             $httpClient,
             $httpFactory,
@@ -122,7 +122,5 @@ class JsonWebToken
             null, // $expiresAfter int seconds to set the JWKS to expire
             true  // $rateLimit    true to enable rate limit of 10 RPS on lookup of invalid keys
         );
-
-        return $keySet;
     }
 }

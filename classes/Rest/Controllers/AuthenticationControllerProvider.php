@@ -179,5 +179,4 @@ class AuthenticationControllerProvider extends BaseControllerProvider
         ));
 
     }
-
 }
