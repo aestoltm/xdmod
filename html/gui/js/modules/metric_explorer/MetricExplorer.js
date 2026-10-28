@@ -6279,7 +6279,11 @@ Ext.extend(XDMoD.Module.MetricExplorer, XDMoD.PortalModule, {
         // ---------------------------------------------------------
 
         self.on('chart_link_clicked', function () {
-            const encodedData = window.btoa(JSON.stringify(this.getConfig()));
+            const bytes = new TextEncoder().encode(JSON.stringify(this.getConfig()));
+            const binString = Array.from(bytes, (byte) =>
+                String.fromCodePoint(byte),
+            ).join("");
+            const encodedData = window.btoa(binString);
             const link = `${window.location.protocol}//${window.location.host}/#main_tab_panel:metric_explorer?config=${encodedData}`;
             const msg = `Use the following link to share the current chart. Note that the link does not override the access controls. So if you send the link to someone who does not have access to the data, they will still not be able to see the data. <br><b>${link}</b>`;
             Ext.Msg.show({
@@ -6355,7 +6359,9 @@ Ext.extend(XDMoD.Module.MetricExplorer, XDMoD.PortalModule, {
         activate: function( /*panel*/ ) {
             this.updateRawDataWindowVisibility();
             if (location.hash.split('config=')[1]) {
-                var config = JSON.parse(window.atob(location.hash.split('config=')[1]));
+                const binString = JSON.parse(window.atob(location.hash.split('config=')[1]));
+                const base64Bytes = Uint8Array.from(binString, (m) => m.codePointAt(0));
+                const config = new TextDecoder().decode(base64Bytes);
                 XDMoD.Module.MetricExplorer.setConfig(config, config.title, true);
             }
         }, // activate
