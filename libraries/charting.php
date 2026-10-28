@@ -99,7 +99,7 @@ function getSvgViaChromiumHelper($html, $width, $height){
 
     $chromiumPath = \xd_utilities\getConfiguration('reporting', 'chromium_path');
 
-    $command = LIB_DIR . '/chrome-helper/chrome-helper.js' .
+    $command = '/usr/bin/env node ' . LIB_DIR . '/chrome-helper/chrome-helper.js' .
         ' --window-size=' . $width . ',' . $height .
         ' --path-to-chrome=' . $chromiumPath .
         ' --input-file=' . $tmpHtmlFile;
