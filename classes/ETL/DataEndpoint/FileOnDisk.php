@@ -1,7 +1,7 @@
 <?php
 /**
  * FileOnDisk aims to suppport a 'destination' data endpoint for files. File writing is handled by ingestor.
- * The purpose of this class is to be explicit about source/destination endpoints are during ingestion.
+ * The purpose of this class is to be explicit about source/destination endpoints during ingestion.
  * Similiar conecpt to the directory scanner execpt the directory scanner is a 'source' data endpoint.
  */
 
@@ -12,7 +12,7 @@ use ETL\DataEndpoint\StructuredFile;
 use Exception;
 use Psr\Log\LoggerInterface;
 
-class FileOnDisk extends aDataEndpoint implements iStructuredFile, iComplexDataRecords
+class FileOnDisk extends aDataEndpoint
 {
     /**
      * @const string Defines the name for this endpoint that should be used in configuration files.
