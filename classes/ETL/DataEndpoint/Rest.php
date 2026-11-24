@@ -51,6 +51,12 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     protected $page = null;
 
     /**
+     * @var bool If the rest request is for a zip download.
+     */
+    protected $isZipDownload = null;
+
+
+    /**
      * @see iDataEndpoint::__construct()
      */
 
@@ -108,6 +114,14 @@ class Rest extends aDataEndpoint implements iDataEndpoint
             }
             $this->page = $options->page;
         }
+
+        if (null !== $options->is_zip_download) {
+            if (! is_bool($options->is_zip_download) ) {
+                $this->logAndThrowException("Request 'is_zip_download' is expected to be numeric, instead got " . gettype($options->is_zip_download) );
+            }
+            $this->isZipDownload = $options->is_zip_download;
+        }
+
 
         $this->generateUniqueKey();
     }
@@ -213,6 +227,15 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     public function getPage()
     {
         return $this->page;
+    }
+
+    /**
+     * @return The number of records to skip for the request.
+     */
+
+    public function getIsZipDownload()
+    {
+        return $this->isZipDownload;
     }
 
     /**
