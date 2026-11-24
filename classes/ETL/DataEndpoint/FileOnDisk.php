@@ -2,7 +2,7 @@
 /**
  * FileOnDisk aims to suppport a 'destination' data endpoint for files. File writing is handled by ingestor.
  * The purpose of this class is to be explicit about source/destination endpoints during ingestion.
- * Similiar conecpt to the directory scanner execpt the directory scanner is a 'source' data endpoint.
+ * Similar conecpt to the directory scanner execpt the directory scanner is a 'source' data endpoint.
  */
 
 namespace ETL\DataEndpoint;
