@@ -51,4 +51,12 @@ class FileOnDisk extends aDataEndpoint
     {
         return $this->path;
     }
+
+    /**
+     * @return void Return nothing as we are just setting the path
+     */
+
+    public function connect(){
+        return;
+    }
 }
