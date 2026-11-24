@@ -24,6 +24,7 @@ use ETL\VariableStore;
 use PDO;
 use Exception;
 use Psr\Log\LoggerInterface;
+use ZipArchive;
 
 class RestIngestor extends aIngestor implements iAction
 {
@@ -267,6 +268,10 @@ class RestIngestor extends aIngestor implements iAction
 
         $this->setRestParameters();
 
+        if ($this->isZipDownload) {
+            setupFile();
+        }
+
         // Keep the current url for logging
         $this->currentUrl = curl_getinfo($this->sourceHandle, CURLINFO_EFFECTIVE_URL);
 
@@ -280,10 +285,6 @@ class RestIngestor extends aIngestor implements iAction
 
         $numRequestsMade = 1;
         $logCount = 10000;
-
-        if ($this->isZipDownload) {
-            setupFile();
-        }
 
         while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
 
@@ -299,7 +300,17 @@ class RestIngestor extends aIngestor implements iAction
 
             if ($this->isZipDownload) {
                 fclose($this->fp);
-                $this->logger->notice("File written to {$this->restIngestDir}/{$this->filename}");
+
+                $zip = new ZipArchive;
+                if (false === $zip->open($this->filename)) {
+                    $this->logAndThrowException("{$this} Error when opening zip file: {$this->filename}");
+                }
+
+                if (false === $zip->extractTo($this->restIngestDir)) {
+                    $this->logAndThrowException("{$this} Error during unzip of {$this->filename}");
+                }
+
+                $this->logger->notice("File written to {$this->filename} and successfully unzipped.");
 
                 if ( false === $this->setNextUrl($response, $nextKey) ) {
                     break;
@@ -477,7 +488,7 @@ class RestIngestor extends aIngestor implements iAction
 
     protected function setRestParameters()
     {
-        if ( 0 === count($this->restParameters) && 0 === count($this->postFields)) {
+        if ( 0 === count($this->restParameters) || 0 === count($this->postFields)) {
             return;
         }
 
@@ -591,6 +602,7 @@ class RestIngestor extends aIngestor implements iAction
                 // Need to be able to skip this not end the run.
 
                 if ( false !== $this->setRestParameters() ) {
+                    if ($this->isZipDownload) setupFile();
                     break;
                 }
             }
