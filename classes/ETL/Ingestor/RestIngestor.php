@@ -122,23 +122,14 @@ class RestIngestor extends aIngestor implements iAction
             );
         }
 
-        if ( ! $this->destinationEndpoint instanceof FileOnDisk ) {
-            $this->logAndThrowException(
-                sprintf(
-                    "Destination endpoint %s does not implement ETL\\DataEndpoint\\FileOnDisk",
-                    get_class($this->destinationEndpoint)
-                )
-            );
-        }
-
-        $this->restIngestDir = $this->destinatonEndpoint->getPath();
-
         $this->sourceEndpoint->connect();
+
+        $this->restIngestDir = $this->sourceEndpoint->getPath();
+        $this->isZipDownload = $this->sourceEndpoint->getIsZipDownload();
 
         $this->limit = $this->sourceEndpoint->getLimit();
         $this->offset = $this->sourceEndpoint->getOffset();
         $this->page = $this->sourceEndpoint->page();
-        $this->isZipDownload = $this->sourceEndpoint->getIsZipDownload();
         // If the source query is specified in the definition file use it to obtain parameters for the
         // rest call. For each record returned by the source query, add the returned columnms to the
         // parameter list and generate one rest call. THIS OVERRIDES THE NEXT/PREV KEYS IN THE RESPONSE!

@@ -197,6 +197,15 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     }
 
     /**
+     * @return The results path from the options
+     */
+
+    public function getPath()
+    {
+        return $this->path;
+    }
+
+    /**
      * @return The base url from the options
      */
 
