@@ -74,6 +74,15 @@ class RestIngestor extends aIngestor implements iAction
     // Request records page
     protected $page = null;
 
+    // If request is for a zip download
+    protected $isZipDownload = false;
+
+    // Current file name
+    protected $filename = "";
+
+    // Current file pointer
+    protected $fp = null;
+
     /* ------------------------------------------------------------------------------------------
      * Set up data endpoints and other options.
      *
@@ -122,12 +131,13 @@ class RestIngestor extends aIngestor implements iAction
         }
 
         $this->restIngestDir = $this->destinatonEndpoint->getPath();
+
         $this->sourceEndpoint->connect();
 
         $this->limit = $this->sourceEndpoint->getLimit();
         $this->offset = $this->sourceEndpoint->getOffset();
         $this->page = $this->sourceEndpoint->page();
-
+        $this->isZipDownload = $this->sourceEndpoint->getIsZipDownload();
         // If the source query is specified in the definition file use it to obtain parameters for the
         // rest call. For each record returned by the source query, add the returned columnms to the
         // parameter list and generate one rest call. THIS OVERRIDES THE NEXT/PREV KEYS IN THE RESPONSE!
@@ -176,8 +186,8 @@ class RestIngestor extends aIngestor implements iAction
                 $this->logAndThrowException("Could not JSON encode post field options within definition file");
             }
 
-            curl_setopt($this->utilityHandle, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($this->utilityHandle, CURLOPT_POST, true);
+            curl_setopt($this->sourceHandle, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($this->sourceHandle, CURLOPT_POST, true);
             $this->postFields = [];
         }
 
@@ -258,9 +268,9 @@ class RestIngestor extends aIngestor implements iAction
         $this->setRestParameters();
 
         // Keep the current url for logging
-        $this->currentUrl = curl_getinfo($this->utilityHandle, CURLINFO_EFFECTIVE_URL);
+        $this->currentUrl = curl_getinfo($this->sourceHandle, CURLINFO_EFFECTIVE_URL);
 
-        curl_setopt($this->utilityHandle, CURLOPT_HTTPHEADER, $requestHeaders);
+        curl_setopt($this->sourceHandle, CURLOPT_HTTPHEADER, $requestHeaders);
 
         $this->logger->info("REST url: {$this->currentUrl}");
 
@@ -271,13 +281,31 @@ class RestIngestor extends aIngestor implements iAction
         $numRequestsMade = 1;
         $logCount = 10000;
 
-        while ( false !== ( $retval = curl_exec($this->utilityHandle) ) ) {
+        if ($this->isZipDownload) {
+            setupFile();
+        }
 
-            if ( 0 !== curl_errno($this->utilityHandle) ) {
-                $this->logAndThrowException("${this} Error during REST call: " . curl_error($this->utilityHandle));
+        while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
+
+            if ( 0 !== curl_errno($this->sourceHandle) ) {
+                $this->logAndThrowException("${this} Error during REST call: " . curl_error($this->sourceHandle));
+
+                if ($this->isZipDownload) {
+                    fclose($this->fp);
+                }
             }
 
             $numRequestsMade++;
+
+            if ($this->isZipDownload) {
+                fclose($this->fp);
+                $this->logger->notice("File written to {$this->restIngestDir}/{$this->filename}");
+
+                if ( false === $this->setNextUrl($response, $nextKey) ) {
+                    break;
+                }
+                continue;
+            }
 
             $response = json_decode($retval);
 
@@ -313,24 +341,13 @@ class RestIngestor extends aIngestor implements iAction
                 continue;
             }  // else ( 0 == count($results) )
 
-            if ( ($file = tempnam($this->restIngestDir, 'xdmod-rest-ingestor-')) === false ) {
-                $this->logAndThrowException("Could not create JSON file, $file, for REST results");
+            setupFile($this->isZipDownload);
+
+            if (fwrite($this->fp, json_encode($results)) === 0) {
+                $this->logAndThrowException("Write failed to {$this->filename}");
             }
 
-            chmod($file, 0644);
-
-            $jsonFile = $file . '.json';
-            rename($file, $jsonFile);
-
-            if ( ($fp = fopen($jsonFile, 'w')) === false) {
-                $this->logAndThrowException("Could not open $jsonFile");
-            }
-
-            if (fwrite($fp, json_encode($results)) === 0) {
-                $this->logAndThrowException("Write failed to $jsonFile");
-            }
-
-            fclose($fp);
+            fclose($this->fp);
 
             // Set up the next url using the "next" key or the source query values
             $moveOffset = isset($this->limit) && ( count(get_object_vars($results)) > $this->limit );
@@ -341,16 +358,46 @@ class RestIngestor extends aIngestor implements iAction
             if ( null !== $this->sourceEndpoint->getSleepMicroseconds() ) {
                 usleep($this->sourceEndpoint->getSleepMicroseconds());
             }
-        }  // while ( false !== ( $retval = curl_exec($this->utilityHandle) ) )
+        }  // while ( false !== ( $retval = curl_exec($this->sourceHandle) ) )
 
-        if ( 0 != curl_errno($this->utilityHandle) ) {
-            $this->logAndThrowException(curl_error($this->utilityHandle));
+        if ( 0 != curl_errno($this->sourceHandle) ) {
+            $this->logAndThrowException(curl_error($this->sourceHandle));
         }
 
         $this->logger->info("Made $numRequestsMade REST requests");
 
         return $numRequestsMade;
     }  // _execute()
+
+    /* ------------------------------------------------------------------------------------------
+     * Set up the file for either zip download or returned results.
+     *
+     * @return void
+     *
+     * @throw Exception If the file could not be created or opened
+     * ------------------------------------------------------------------------------------------
+     */
+
+    protected function setupFile() {
+        if ( ($file = tempnam($this->restIngestDir, 'xdmod-rest-ingestor-')) === false ) {
+            $this->logAndThrowException("Could not create JSON file, $file, for REST results");
+        }
+
+        chmod($file, 0644);
+
+        $jsonFile = $file . '.json';
+        $this->filename = $jsonFile;
+        rename($file, $jsonFile);
+
+        $mode = $this->isZipDownload ? 'wb' : 'w';
+        if ( ($this->fp = fopen($jsonFile, $mode)) === false) {
+            $this->logAndThrowException("Could not open $jsonFile");
+        }
+
+        if ($this->isZipDownload) {
+            curl_setopt($this->sourceHandle, CURLOPT_FILE, $fp);
+        }
+    }
 
     /* ------------------------------------------------------------------------------------------
      * The REST ingestor supports request parameters specified in the definition file. Process these
@@ -438,7 +485,7 @@ class RestIngestor extends aIngestor implements iAction
             $vs = new VariableStore($this->postFields);
             $postString = $vs->substitute($this->postFieldString);
 
-            curl_setopt($this->utilityHandle, CURLOPT_POSTFIELDS, $postString);
+            curl_setopt($this->sourceHandle, CURLOPT_POSTFIELDS, $postString);
             return $this;
         }
 
@@ -481,7 +528,7 @@ class RestIngestor extends aIngestor implements iAction
         }
 
         $this->currentUrl = $newUrl = $this->sourceEndpoint->getBaseUrl() . $queryString;
-        curl_setopt($this->utilityHandle, CURLOPT_URL, $newUrl);
+        curl_setopt($this->sourceHandle, CURLOPT_URL, $newUrl);
 
         return $this;
 
@@ -557,7 +604,7 @@ class RestIngestor extends aIngestor implements iAction
                 return false;
             } else {
                 $this->currentUrl = $response->$nextKey;
-                curl_setopt($this->utilityHandle, CURLOPT_URL, $response->$nextKey);
+                curl_setopt($this->sourceHandle, CURLOPT_URL, $response->$nextKey);
             }
         } else {
             // No next key and no source query
