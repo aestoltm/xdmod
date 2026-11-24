@@ -25,7 +25,7 @@ use PDO;
 use Exception;
 use Psr\Log\LoggerInterface;
 
-class RestIngestor extends StructuredFileIngestor implements iAction
+class RestIngestor extends aIngestor implements iAction
 {
     // Parsed configuration options for REST request handling
     protected $restRequestConfig = null;
@@ -103,22 +103,30 @@ class RestIngestor extends StructuredFileIngestor implements iAction
 
         parent::initialize($etlOverseerOptions);
 
-        $this->restIngestDir = $this->sourceEndpoint->getPath();
-
-        if ( ! $this->utilityEndpoint instanceof Rest ) {
+        if ( ! $this->sourceEndpoint instanceof Rest ) {
             $this->logAndThrowException(
                 sprintf(
                     "Utility endpoint %s does not implement ETL\\DataEndpoint\\Rest",
-                    get_class($this->utilityEndpoint)
+                    get_class($this->sourceEndpoint)
                 )
             );
         }
 
-        $this->utilityEndpoint->connect();
+        if ( ! $this->destinationEndpoint instanceof FileOnDisk ) {
+            $this->logAndThrowException(
+                sprintf(
+                    "Destination endpoint %s does not implement ETL\\DataEndpoint\\FileOnDisk",
+                    get_class($this->destinationEndpoint)
+                )
+            );
+        }
 
-        $this->limit = $this->utilityEndpoint->getLimit();
-        $this->offset = $this->utilityEndpoint->getOffset();
-        $this->page = $this->utilityEndpoint->page();
+        $this->restIngestDir = $this->destinatonEndpoint->getPath();
+        $this->sourceEndpoint->connect();
+
+        $this->limit = $this->sourceEndpoint->getLimit();
+        $this->offset = $this->sourceEndpoint->getOffset();
+        $this->page = $this->sourceEndpoint->page();
 
         // If the source query is specified in the definition file use it to obtain parameters for the
         // rest call. For each record returned by the source query, add the returned columnms to the
@@ -126,7 +134,7 @@ class RestIngestor extends StructuredFileIngestor implements iAction
 
         if ( null === $this->etlSourceQuery && isset($this->parsedDefinitionFile->source_query) ) {
             $this->logger->debug("Create ETL source query object");
-            $this->parameterEndpoint = $this->utilityEndpoint->getRestParameterEndpoint();
+            $this->parameterEndpoint = $this->sourceEndpoint->getRestParameterEndpoint();
             $this->parameterEndpoint->connect();
             $this->etlSourceQuery = new Query(
                 $this->parsedDefinitionFile->source_query,
@@ -218,7 +226,13 @@ class RestIngestor extends StructuredFileIngestor implements iAction
 
     }  // performPreExecuteTasks()
 
-    private function executeRestCalls()
+    /* ------------------------------------------------------------------------------------------
+     * @see aIngestor::_execute()
+     * ------------------------------------------------------------------------------------------
+     */
+
+     // @codingStandardsIgnoreLine
+    protected function _execute()
     {
         // Support a source query, mapping from the source to rest parameters, rest field map
         $requestHeaders = ( isset($this->restRequestConfig->requestHeaders) ? (array) $this->restRequestConfig->requestHeaders : [] );
@@ -319,14 +333,13 @@ class RestIngestor extends StructuredFileIngestor implements iAction
             fclose($fp);
 
             // Set up the next url using the "next" key or the source query values
-            if ( false === $this->setNextUrl($response, $nextKey, true) ) {
+            $moveOffset = isset($this->limit) && ( count(get_object_vars($results)) > $this->limit );
+            if ( false === $this->setNextUrl($response, $nextKey, $moveOffset) ) {
                 break;
             }
 
-            $numRequestsMade++;
-
-            if ( null !== $this->utilityEndpoint->getSleepMicroseconds() ) {
-                usleep($this->utilityEndpoint->getSleepMicroseconds());
+            if ( null !== $this->sourceEndpoint->getSleepMicroseconds() ) {
+                usleep($this->sourceEndpoint->getSleepMicroseconds());
             }
         }  // while ( false !== ( $retval = curl_exec($this->utilityHandle) ) )
 
@@ -337,19 +350,6 @@ class RestIngestor extends StructuredFileIngestor implements iAction
         $this->logger->info("Made $numRequestsMade REST requests");
 
         return $numRequestsMade;
-    }
-
-    /* ------------------------------------------------------------------------------------------
-     * @see aIngestor::_execute()
-     * ------------------------------------------------------------------------------------------
-     */
-
-     // @codingStandardsIgnoreLine
-    protected function _execute()
-    {
-        $this->executeRestCalls();
-        parent::_execute();
-        $this->sourceEndpoint->cleanUpDirectory();
     }  // _execute()
 
     /* ------------------------------------------------------------------------------------------
@@ -480,7 +480,7 @@ class RestIngestor extends StructuredFileIngestor implements iAction
             $queryString = "?" . implode("&", $parameters);
         }
 
-        $this->currentUrl = $newUrl = $this->utilityEndpoint->getBaseUrl() . $queryString;
+        $this->currentUrl = $newUrl = $this->sourceEndpoint->getBaseUrl() . $queryString;
         curl_setopt($this->utilityHandle, CURLOPT_URL, $newUrl);
 
         return $this;
@@ -498,30 +498,38 @@ class RestIngestor extends StructuredFileIngestor implements iAction
      * ------------------------------------------------------------------------------------------
      */
 
-    protected function setNextUrl(\stdClass $response, $nextKey, $checkOffset = false)
+    protected function setNextUrl(\stdClass $response, $nextKey, $moveOffset = false)
     {
+        if (isset($this->limit)) {
+            if (!isset($this->offset) && !isset($this->page)) {
+                $this->logAndThrowException("Must set 'offset' or 'page' when using 'limit'.");
+            }
+        }
         // Check if we are using the same URL but making a new request due to offset/paginig
         //
         // If the next key was specified, use the value from the response for the next call. If we are
         // using a source query, do not use the next key returned in the response.
-        if ($checkOffset && isset($this->limit)) {
+        if ($moveOffset) {
             if (isset($this->offset)) {
                 $this->offset += $this->limit;
                 $this->setParameter('offset', $this->offset);
                 $this->logger->debug("New request record offset: {$this->offset}");
-            } else if (isset($this->page) {
+            } else {
                 $this->page++;
                 $this->setParameter('page', $this->page);
                 $this->logger->debug("New request record page: {$this->page}");
-            } else {
-                $this->logAndThrowException("Must set 'offset' or 'page' when using 'limit'.");
             }
             $this->setRestParameters();
         } elseif ( null !== $this->etlSourceQuery && null !== $this->etlSourceQueryResult ) {
 
-            if (isset($this->offset) && isset($this->limit)) {
-                $this->offset = 0;
-                $this->setParameter('offset', $this->offset);
+            if (isset($this->limit)) {
+                if (isset($this->offset) {
+                    $this->offset = 0;
+                    $this->setParameter('offset', $this->offset);
+                } else {
+                    $this->page = 0;
+                    $this->setParameter('page', $this->offset);
+                }
             }
             // Continue pulling from the source query until we reach the end or we pass parameter verification
 
@@ -556,8 +564,8 @@ class RestIngestor extends StructuredFileIngestor implements iAction
             return false;
         }
 
-        if ( null !== $this->utilityEndpoint->getSleepMicroseconds() ) {
-            usleep($this->utilityEndpoint->getSleepMicroseconds());
+        if ( null !== $this->sourceEndpoint->getSleepMicroseconds() ) {
+            usleep($this->sourceEndpoint->getSleepMicroseconds());
         }
 
         $this->logger->debug("REST url: {$this->currentUrl}");
