@@ -26,11 +26,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     protected $baseUrl = null;
 
     /**
-     * @var string THe path for the rest result files
-     */
-    protected $path = null;
-
-    /**
      * @var integer The number of microseconds to sleep between REST requests.
      */
     protected $sleepMicroseconds = null;
@@ -69,18 +64,10 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     {
         parent::__construct($options, $logger);
 
-        $requiredKeys = ["base_url", "path"];
+        $requiredKeys = ["base_url"];
         $this->verifyRequiredConfigKeys($requiredKeys, $options);
 
-
         $this->baseUrl = $options->base_url;
-
-        $this->path = $options->path;
-        if ( 0 !== strpos($this->path, '/') ) {
-            $this->logger->info(
-                sprintf("%s: Relative path provided, absolute path recommended", $this)
-            );
-        }
 
         if ( null !== $options->sleep_seconds ) {
             if (! is_numeric($options->sleep_seconds) ) {
@@ -194,15 +181,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     public function getBaseUrl()
     {
         return $this->baseUrl;
-    }
-
-    /**
-     * @return The results path from the options
-     */
-
-    public function getPath()
-    {
-        return $this->path;
     }
 
     /**

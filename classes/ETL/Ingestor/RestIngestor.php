@@ -14,6 +14,7 @@ namespace ETL\Ingestor;
 
 use ETL\DataEndpoint\Rest;
 use ETL\DataEndpoint\aRdbmsEndpoint;
+use ETL\DataEndpoint\FileOnDisk;
 use ETL\Configuration\EtlConfiguration;
 use ETL\EtlOverseerOptions;
 use ETL\DbModel\Query;
@@ -116,7 +117,16 @@ class RestIngestor extends aIngestor implements iAction
         if ( ! $this->sourceEndpoint instanceof Rest ) {
             $this->logAndThrowException(
                 sprintf(
-                    "Utility endpoint %s does not implement ETL\\DataEndpoint\\Rest",
+                    "Source endpoint %s does not implement ETL\\DataEndpoint\\Rest",
+                    get_class($this->sourceEndpoint)
+                )
+            );
+        }
+
+        if ( ! $this->destinationEndpoint instanceof FileOnDisk ) {
+            $this->logAndThrowException(
+                sprintf(
+                    "Destination endpoint %s does not implement ETL\\DataEndpoint\\FileOnDisk",
                     get_class($this->sourceEndpoint)
                 )
             );
@@ -124,7 +134,7 @@ class RestIngestor extends aIngestor implements iAction
 
         $this->sourceEndpoint->connect();
 
-        $this->restIngestDir = $this->sourceEndpoint->getPath();
+        $this->restIngestDir = $this->destinationEndpoint->getPath();
         $this->isZipDownload = $this->sourceEndpoint->getIsZipDownload();
 
         $this->limit = $this->sourceEndpoint->getLimit();
@@ -259,8 +269,10 @@ class RestIngestor extends aIngestor implements iAction
 
         $this->setRestParameters();
 
+        // Zip files need file setup beforehand to stream data from CURL
         if ($this->isZipDownload) {
-            setupFile();
+            $this->destinationEndpoint->connect();
+            curl_setopt($this->sourceHandle, CURLOPT_FILE, $this->destinationEndpoint->getHandle());
         }
 
         // Keep the current url for logging
@@ -283,25 +295,14 @@ class RestIngestor extends aIngestor implements iAction
                 $this->logAndThrowException("${this} Error during REST call: " . curl_error($this->sourceHandle));
 
                 if ($this->isZipDownload) {
-                    fclose($this->fp);
+                    $this->destinationEndpoint->disconnect();
                 }
             }
 
             $numRequestsMade++;
 
             if ($this->isZipDownload) {
-                fclose($this->fp);
-
-                $zip = new ZipArchive;
-                if (false === $zip->open($this->filename)) {
-                    $this->logAndThrowException("{$this} Error when opening zip file: {$this->filename}");
-                }
-
-                if (false === $zip->extractTo($this->restIngestDir)) {
-                    $this->logAndThrowException("{$this} Error during unzip of {$this->filename}");
-                }
-
-                $this->logger->notice("File written to {$this->filename} and successfully unzipped.");
+                $this->destinationEndpoint->unzipFile();
 
                 if ( false === $this->setNextUrl($response, $nextKey) ) {
                     break;
@@ -343,13 +344,8 @@ class RestIngestor extends aIngestor implements iAction
                 continue;
             }  // else ( 0 == count($results) )
 
-            setupFile($this->isZipDownload);
-
-            if (fwrite($this->fp, json_encode($results)) === 0) {
-                $this->logAndThrowException("Write failed to {$this->filename}");
-            }
-
-            fclose($this->fp);
+            $this->destinationEndpoint->connect();
+            $this->destinationEndpoint->writeDataToJSON($results);
 
             // Set up the next url using the "next" key or the source query values
             $moveOffset = isset($this->limit) && ( count(get_object_vars($results)) > $this->limit );
@@ -370,36 +366,6 @@ class RestIngestor extends aIngestor implements iAction
 
         return $numRequestsMade;
     }  // _execute()
-
-    /* ------------------------------------------------------------------------------------------
-     * Set up the file for either zip download or returned results.
-     *
-     * @return void
-     *
-     * @throw Exception If the file could not be created or opened
-     * ------------------------------------------------------------------------------------------
-     */
-
-    protected function setupFile() {
-        if ( ($file = tempnam($this->restIngestDir, 'xdmod-rest-ingestor-')) === false ) {
-            $this->logAndThrowException("Could not create JSON file, $file, for REST results");
-        }
-
-        chmod($file, 0644);
-
-        $jsonFile = $file . '.json';
-        $this->filename = $jsonFile;
-        rename($file, $jsonFile);
-
-        $mode = $this->isZipDownload ? 'wb' : 'w';
-        if ( ($this->fp = fopen($jsonFile, $mode)) === false) {
-            $this->logAndThrowException("Could not open $jsonFile");
-        }
-
-        if ($this->isZipDownload) {
-            curl_setopt($this->sourceHandle, CURLOPT_FILE, $fp);
-        }
-    }
 
     /* ------------------------------------------------------------------------------------------
      * The REST ingestor supports request parameters specified in the definition file. Process these
@@ -572,7 +538,7 @@ class RestIngestor extends aIngestor implements iAction
         } elseif ( null !== $this->etlSourceQuery && null !== $this->etlSourceQueryResult ) {
 
             if (isset($this->limit)) {
-                if (isset($this->offset) {
+                if (isset($this->offset)) {
                     $this->offset = 0;
                     $this->setParameter('offset', $this->offset);
                 } else {
@@ -593,7 +559,11 @@ class RestIngestor extends aIngestor implements iAction
                 // Need to be able to skip this not end the run.
 
                 if ( false !== $this->setRestParameters() ) {
-                    if ($this->isZipDownload) setupFile();
+                    // Zip files need file setup beforehand to stream data from CURL
+                    if ($this->isZipDownload) {
+                        $this->destinationEndpoint->connect();
+                        curl_setopt($this->sourceHandle, CURLOPT_FILE, $this->destinationEndpoint->getHandle());
+                    }
                     break;
                 }
             }
