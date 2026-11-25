@@ -112,7 +112,7 @@ class FileOnDisk extends File implements iDataEndpoint
 
     public function writeDataToJSON(&$data)
     {
-        $this->connect();
+        $this->prepareTmpFile();
         if (fwrite($this->handle, json_encode($data)) === 0) {
             $this->logAndThrowException("Write failed to {$this->path}");
         }
