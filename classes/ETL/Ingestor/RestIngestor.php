@@ -19,6 +19,7 @@ use ETL\Configuration\EtlConfiguration;
 use ETL\EtlOverseerOptions;
 use ETL\DbModel\Query;
 use ETL\aOptions;
+use ETL\aAction;
 use ETL\iAction;
 use ETL\VariableStore;
 
@@ -27,7 +28,7 @@ use Exception;
 use Psr\Log\LoggerInterface;
 use ZipArchive;
 
-class RestIngestor extends aIngestor implements iAction
+class RestIngestor extends aAction implements iAction
 {
     // Parsed configuration options for REST request handling
     protected $restRequestConfig = null;
@@ -57,10 +58,6 @@ class RestIngestor extends aIngestor implements iAction
     // The current url, useful for debugging
     protected $currentUrl = null;
 
-    // This action does not (yet) support multiple destination tables. If multiple destination
-    // tables are present, store the first here and use it.
-    protected $etlDestinationTable = null;
-
     // Rest results directory
     protected $restIngestDir = null;
 
@@ -72,15 +69,6 @@ class RestIngestor extends aIngestor implements iAction
 
     // Request records page
     protected $page = null;
-
-    // If request is for a zip download
-    protected $isZipDownload = false;
-
-    // Current file name
-    protected $filename = "";
-
-    // Current file pointer
-    protected $fp = null;
 
     /* ------------------------------------------------------------------------------------------
      * Set up data endpoints and other options.
@@ -158,7 +146,7 @@ class RestIngestor extends aIngestor implements iAction
 
         $this->limit = $this->sourceEndpoint->getLimit();
         $this->offset = $this->sourceEndpoint->getOffset();
-        $this->page = $this->sourceEndpoint->page();
+        $this->page = $this->sourceEndpoint->getPage();
         // If the source query is specified in the definition file use it to obtain parameters for the
         // rest call. For each record returned by the source query, add the returned columnms to the
         // parameter list and generate one rest call. THIS OVERRIDES THE NEXT/PREV KEYS IN THE RESPONSE!
@@ -227,8 +215,6 @@ class RestIngestor extends aIngestor implements iAction
     protected function performPreExecuteTasks()
     {
 
-        parent::performPreExecuteTasks();
-
         // If using a source query, execute it and prepare the result set
 
         if ( null !== $this->etlSourceQuery ) {
@@ -256,12 +242,23 @@ class RestIngestor extends aIngestor implements iAction
     }  // performPreExecuteTasks()
 
     /* ------------------------------------------------------------------------------------------
+     * @see aAction::performPostExecuteTasks()
+     * ------------------------------------------------------------------------------------------
+     */
+
+    protected function performPostExecuteTasks($numRecordsProcessed = null)
+    {
+        // No post execution tasks defined so far but needed by aAction.
+        return;
+    }  // performPostExecuteTasks()
+
+    /* ------------------------------------------------------------------------------------------
      * @see aIngestor::_execute()
      * ------------------------------------------------------------------------------------------
      */
 
      // @codingStandardsIgnoreLine
-    protected function _execute()
+    public function execute(EtlOverseerOptions $etlOptions)
     {
         // Support a source query, mapping from the source to rest parameters, rest field map
         $requestHeaders = ( isset($this->restRequestConfig->requestHeaders) ? (array) $this->restRequestConfig->requestHeaders : [] );
@@ -271,117 +268,142 @@ class RestIngestor extends aIngestor implements iAction
         // Perform a-priori verifications
 
         $timeStart = microtime(true);
+        $this->initialize($etlOptions);
 
-        // If using a source query, set parameters for the current result.
+        if ( false !== $this->performPreExecuteTasks() ) {
 
-        if ( null !== $this->etlSourceQuery && null !== $this->etlSourceQueryResult ) {
-            $row = $this->etlSourceQueryResult->fetch(PDO::FETCH_ASSOC);
-            foreach( $row as $k => $v ) {
-                $this->setParameter($k, $v);
-            }
-        }
+            // If using a source query, set parameters for the current result.
 
-        // --------------------------------------------------------------------------------
-        // Retrieve and process the REST results
-
-        $this->setRestParameters();
-
-        // Zip files need file setup beforehand to stream data from CURL
-        if ($this->isZipDownload) {
-            $this->destinationEndpoint->connect();
-            curl_setopt($this->sourceHandle, CURLOPT_FILE, $this->destinationEndpoint->getHandle());
-        }
-
-        // Keep the current url for logging
-        $this->currentUrl = curl_getinfo($this->sourceHandle, CURLINFO_EFFECTIVE_URL);
-
-        curl_setopt($this->sourceHandle, CURLOPT_HTTPHEADER, $requestHeaders);
-
-        $this->logger->info("REST url: {$this->currentUrl}");
-
-        if ( $this->getEtlOverseerOptions()->isDryrun() ) {
-            return 0;
-        }
-
-        $numRequestsMade = 1;
-        $logCount = 10000;
-
-        while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
-
-            if ( 0 !== curl_errno($this->sourceHandle) ) {
-                $this->logAndThrowException("${this} Error during REST call: " . curl_error($this->sourceHandle));
-
-                if ($this->isZipDownload) {
-                    $this->destinationEndpoint->disconnect();
+            if ( null !== $this->etlSourceQuery && null !== $this->etlSourceQueryResult ) {
+                $row = $this->etlSourceQueryResult->fetch(PDO::FETCH_ASSOC);
+                foreach( $row as $k => $v ) {
+                    $this->setParameter($k, $v);
                 }
-            }
-
-            $numRequestsMade++;
-
-            if ($this->isZipDownload) {
-                $this->destinationEndpoint->unzipFile();
-
-                if ( false === $this->setNextUrl($response, $nextKey) ) {
-                    break;
-                }
-                continue;
-            }
-
-            $response = json_decode($retval);
-
-            if ( null === $response || ! is_object($response) ) {
-                $this->logAndThrowException("{$this} Response is not an object: $retval");
             }
 
             // --------------------------------------------------------------------------------
-            // Identify the various parts of the response based on the configuration and verify them
+            // Retrieve and process the REST results
 
-            // If a top level response key is provided, grab the data that it contains.
+            $this->setRestParameters();
 
-            $results = null;
-            if ( $responseKey !== null ) {
-                if ( ! isset($response->$responseKey) ) {
-                    $this->logger->warning(
-                        "Configured top-level response key '$responseKey' not found in response. "
-                        . "Response keys are '" . implode(",", array_keys((array) $response)) . "'"
-                    );
-                } else {
-                    $results = $response->$responseKey;
-                }
-            } else {
-                $results = $response;
+            // Zip files need file setup beforehand to stream data from CURL
+            if ($this->isZipDownload) {
+                $this->destinationEndpoint->prepareTmpFile();
+                curl_setopt_array($this->sourceHandle, [
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_COOKIEFILE     => '',
+                    CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; XDMoD/11.0)',
+                    CURLOPT_FAILONERROR    => true,
+                    CURLOPT_CONNECTTIMEOUT => 30,
+                    CURLOPT_TIMEOUT        => 0,
+                    CURLOPT_FILE => $this->destinationEndpoint->getHandle()
+                ]);
             }
 
-            if ( empty($results) ) {
-                $this->logger->notice("Request returned an empty result set, skipping. url = {$this->currentUrl}");
+            // Keep the current url for logging
+            $this->currentUrl = curl_getinfo($this->sourceHandle, CURLINFO_EFFECTIVE_URL);
 
-                if ( false === $this->setNextUrl($response, $nextKey) ) {
+            curl_setopt($this->sourceHandle, CURLOPT_HTTPHEADER, $requestHeaders);
+
+            $this->logger->info("REST url: {$this->currentUrl}");
+
+            if ( $this->getEtlOverseerOptions()->isDryrun() ) {
+                return 0;
+            }
+
+            $numRequestsMade = 1;
+            $logCount = 10000;
+
+            while ( false !== ( $retval = curl_exec($this->sourceHandle) ) ) {
+
+                if ( 0 !== curl_errno($this->sourceHandle) ) {
+                    $this->logAndThrowException("${this} Error during REST call: " . curl_error($this->sourceHandle));
+
+                    if ($this->isZipDownload) {
+                        $this->destinationEndpoint->disconnect();
+                    }
+                }
+
+                $numRequestsMade++;
+
+                $response = json_decode($retval);
+
+                if ($this->isZipDownload) {
+                    $this->destinationEndpoint->unzipFile();
+                    // Request from zip file downloads do not use response 'next' key
+                    // which is used by 'setNextUrl()'
+                     if ( false === $this->setNextUrl(new \stdClass(), $nextKey) ) {
+                        break;
+                    }
+                    continue;
+                }
+
+                if ( null === $response || ! is_object($response) ) {
+                    $this->logAndThrowException("{$this} Response is not an object: $retval");
+                }
+
+                // --------------------------------------------------------------------------------
+                // Identify the various parts of the response based on the configuration and verify them
+
+                // If a top level response key is provided, grab the data that it contains.
+
+                $results = null;
+                if ( $responseKey !== null ) {
+                    if ( ! isset($response->$responseKey) ) {
+                        $this->logger->warning(
+                            "Configured top-level response key '$responseKey' not found in response. "
+                            . "Response keys are '" . implode(",", array_keys((array) $response)) . "'"
+                        );
+                    } else {
+                        $results = $response->$responseKey;
+                    }
+                } else {
+                    $results = $response;
+                }
+
+                if ( empty($results) ) {
+                    $this->logger->notice("Request returned an empty result set, skipping. url = {$this->currentUrl}");
+
+                    if ( false === $this->setNextUrl($response, $nextKey) ) {
+                        break;
+                    }
+                    continue;
+                }  // else ( 0 == count($results) )
+
+                $this->destinationEndpoint->writeDataToJSON($results);
+
+                // Set up the next url using the "next" key or the source query values
+                $moveOffset = isset($this->limit) && ( count(get_object_vars($results)) > $this->limit );
+                if ( false === $this->setNextUrl($response, $nextKey, $moveOffset) ) {
                     break;
                 }
-                continue;
-            }  // else ( 0 == count($results) )
 
-            $this->destinationEndpoint->connect();
-            $this->destinationEndpoint->writeDataToJSON($results);
+                if ( null !== $this->sourceEndpoint->getSleepMicroseconds() ) {
+                    usleep($this->sourceEndpoint->getSleepMicroseconds());
+                }
+            }  // while ( false !== ( $retval = curl_exec($this->sourceHandle) ) )
 
-            // Set up the next url using the "next" key or the source query values
-            $moveOffset = isset($this->limit) && ( count(get_object_vars($results)) > $this->limit );
-            if ( false === $this->setNextUrl($response, $nextKey, $moveOffset) ) {
-                break;
+            if ( 0 != curl_errno($this->sourceHandle) ) {
+                $this->logAndThrowException(curl_error($this->sourceHandle));
             }
 
-            if ( null !== $this->sourceEndpoint->getSleepMicroseconds() ) {
-                usleep($this->sourceEndpoint->getSleepMicroseconds());
-            }
-        }  // while ( false !== ( $retval = curl_exec($this->sourceHandle) ) )
+            $this->performPostExecuteTasks($numRequestsMade);
 
-        if ( 0 != curl_errno($this->sourceHandle) ) {
-            $this->logAndThrowException(curl_error($this->sourceHandle));
-        }
+        } // if ( false !== $this->performPreExecuteTasks() )
 
-        $this->logger->info("Made $numRequestsMade REST requests");
+        $time_end = microtime(true);
+        $time = $time_end - $time_start;
 
-        return $numRequestsMade;
+        $this->logger->notice(
+            '',
+            [
+                'action' => (string)$this,
+                'start_time' => $time_start,
+                'end_time' => $time_end,
+                'elapsed_time' => round($time, 5),
+                'requests_made' => $numRequestsMade,
+            ]
+        );
     }  // _execute()
 
     /* ------------------------------------------------------------------------------------------
@@ -462,7 +484,7 @@ class RestIngestor extends aIngestor implements iAction
 
     protected function setRestParameters()
     {
-        if ( 0 === count($this->restParameters) || 0 === count($this->postFields)) {
+        if ( 0 === count($this->restParameters) && 0 === count($this->postFields)) {
             return;
         }
 
@@ -578,7 +600,7 @@ class RestIngestor extends aIngestor implements iAction
                 if ( false !== $this->setRestParameters() ) {
                     // Zip files need file setup beforehand to stream data from CURL
                     if ($this->isZipDownload) {
-                        $this->destinationEndpoint->connect();
+                        $this->destinationEndpoint->prepareTmpFile();
                         curl_setopt($this->sourceHandle, CURLOPT_FILE, $this->destinationEndpoint->getHandle());
                     }
                     break;

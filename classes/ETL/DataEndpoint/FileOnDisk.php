@@ -33,6 +33,11 @@ class FileOnDisk extends File implements iDataEndpoint
     protected $tempFileName = null;
 
     /**
+     * @var string File mode. See http://php.net/manual/en/function.fopen.php
+     */
+    protected $mode = 'w';
+
+    /**
      * @see iDataEndpoint::__construct()
      */
 
@@ -66,8 +71,17 @@ class FileOnDisk extends File implements iDataEndpoint
         return $this->fileExtension;
     }
 
+    /**
+     * @see iDataEndpoint::connect()
+     */
+
+    public function connect()
+    {
+        $this->handle = null;
+    }
+
     /* ------------------------------------------------------------------------------------------
-     * Create temporary file and point handler to it. Supports zip files (used by RestIngestor)
+     * Create temporary file and point handle to it. Supports zip files (used by RestIngestor)
      *
      * @return void
      *
@@ -75,17 +89,17 @@ class FileOnDisk extends File implements iDataEndpoint
      * ------------------------------------------------------------------------------------------
      */
 
-    public function connect() {
+    public function prepareTmpFile() {
         if ( ($file = tempnam($this->path, 'xdmod-')) === false ) {
             $this->logAndThrowException("Could not create temp file, $file");
         }
 
         chmod($file, 0644);
-        $tmpFile = $file . $this->fileExtension;
+        $tmpFile = $file . '.' . $this->fileExtension;
         rename($file, $tmpFile);
-
-        $this->mode = $this->determineFileMode();
-        if ( ($this->handler = fopen($tmpFile, $this->mode)) === false) {
+        $this->logger->debug($tmpFile . " created.");
+        $this->mode = isset($this->mode) ? $this->mode : $this->determineFileMode();
+        if ( ($this->handle = fopen($tmpFile, $this->mode)) === false) {
             $this->logAndThrowException("Could not open $tmpFile");
         }
 
@@ -98,7 +112,8 @@ class FileOnDisk extends File implements iDataEndpoint
 
     public function writeDataToJSON(&$data)
     {
-        if (fwrite($this->handler, json_encode($data)) === 0) {
+        $this->connect();
+        if (fwrite($this->handle, json_encode($data)) === 0) {
             $this->logAndThrowException("Write failed to {$this->path}");
         }
     }
@@ -109,7 +124,7 @@ class FileOnDisk extends File implements iDataEndpoint
 
     public function unzipFile()
     {
-        if (!isset($this->tmpFileName) {
+        if (!isset($this->tmpFileName)) {
             $this->logAndThrowException("{$this} Missing file to unzip: {$this->tmpFileName}");
         }
 
@@ -129,8 +144,27 @@ class FileOnDisk extends File implements iDataEndpoint
         }
 
         $this->logger->notice("{$this->tmpFileName} successfully unzipped.");
-        unlink($this->tmpFileName)
+        unlink($this->tmpFileName);
         $this->tmpFileName = null;
+    }
+
+    public function verify($dryrun = false, $leaveConnected = false)
+    {
+        $writeModes = array("r+", "w", "wb", "w+", "a", "a+", "x", "x+", "c", "c+");
+
+        if ( ! in_array($this->mode, $writeModes) ) {
+            $this->logAndThrowException("Unsupported mode '" . $this->mode . "'");
+        }
+
+        if ( ! is_dir($this->path) ) {
+            $this->logAndThrowException("Path '" . $this->path . "' is not a directory");
+        }
+
+        if ( ! is_readable($this->path) ) {
+            $this->logAndThrowException("Path '" . $this->path . "' is not readable");
+        }
+
+        return true;
     }
 
     /**
