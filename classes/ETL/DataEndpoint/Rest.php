@@ -31,11 +31,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     protected $sleepMicroseconds = null;
 
     /**
-     * @var Mysql Utility Mysql endpoint for REST parameters
-     */
-    protected $restParameterEndpoint = null;
-
-    /**
      * @var integer The number of records to pull for the request.
      */
     protected $limit = null;
@@ -49,12 +44,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
      * @var integer The page number for the request records.
      */
     protected $page = null;
-
-    /**
-     * @var bool If the rest request is for a zip download.
-     */
-    protected $isZipDownload = null;
-
 
     /**
      * @see iDataEndpoint::__construct()
@@ -75,19 +64,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
             }
             $seconds = (float) $options->sleep_seconds;
             $this->sleepMicroseconds = $seconds * 1000000;
-        }
-
-        if ( null !== $options->parameter_endpoint ) {
-            if ( ! is_object($options->parameter_endpoint) ) {
-                $this->logAndThrowException("Parameter utility endpoint is expected to be object, instead got " . gettype($options->parameter_endpoint) );
-            }
-
-            $param_endpoint_options = new DataEndpointOptions();
-            foreach ( $options->parameter_endpoint as $key => $value ) {
-                $param_endpoint_options->$key = $value;
-            }
-
-            $this->restParameterEndpoint = DataEndpoint::factory($param_endpoint_options, $this->logger);
         }
 
         if (null !== $options->limit) {
@@ -113,14 +89,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
             }
             $this->page = $options->page;
         }
-
-        if (null !== $options->is_zip_download) {
-            if (! is_bool($options->is_zip_download) ) {
-                $this->logAndThrowException("Request 'is_zip_download' is expected to be numeric, instead got " . gettype($options->is_zip_download) );
-            }
-            $this->isZipDownload = $options->is_zip_download;
-        }
-
 
         $this->generateUniqueKey();
     }
@@ -184,15 +152,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     }
 
     /**
-     * @return The base url from the options
-     */
-
-    public function getRestParameterEndpoint()
-    {
-        return $this->restParameterEndpoint;
-    }
-
-    /**
      * @return The number of microseconds to sleep between REST calls
      */
 
@@ -226,15 +185,6 @@ class Rest extends aDataEndpoint implements iDataEndpoint
     public function getPage()
     {
         return $this->page;
-    }
-
-    /**
-     * @return The number of records to skip for the request.
-     */
-
-    public function getIsZipDownload()
-    {
-        return $this->isZipDownload;
     }
 
     /**

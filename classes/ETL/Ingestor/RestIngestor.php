@@ -61,9 +61,6 @@ class RestIngestor extends aIngestor implements iAction
     // tables are present, store the first here and use it.
     protected $etlDestinationTable = null;
 
-    // Rest parameter helper endpoint
-    protected $parameterEndpoint = null;
-
     // Rest results directory
     protected $restIngestDir = null;
 
@@ -123,6 +120,28 @@ class RestIngestor extends aIngestor implements iAction
             );
         }
 
+        if (isset($this->utilityEndpoint)) {
+            if ( ! $this->utilityEndpoint instanceof aRdbmsEndpoint) {
+                $this->logAndThrowException(
+                    sprintf(
+                        "Utility endpoint %s does not implement ETL\\DataEndpoint\\aRdbmsEndpoint",
+                        get_class($this->utilityEndpoint)
+                    )
+                );
+            }
+        }
+
+        // Would like to be able to say that this could support writing to database directly
+        // but until we have database endpoints handle the insertion queries then they
+        // are tightly coupled to the ingestors.
+        //
+        // Currently every ingestor is tightly coupled to just a database destination data endpoint type.
+        // This is the only endpoint to my knowledge that is attempting to be agnostic to different
+        // destination endpoints (disk, database). Other endpoints don't necessarily have such a use case
+        // but there are good reasons to write database results to disk (databases change and its easier
+        // to restore if we have the raw data on disk). To my understanding if the ETL framework aims to be modular
+        // then we would really just have one ingestor that supports any source data endpoint and any destination
+        // data endpoint.
         if ( ! $this->destinationEndpoint instanceof FileOnDisk ) {
             $this->logAndThrowException(
                 sprintf(
@@ -135,7 +154,7 @@ class RestIngestor extends aIngestor implements iAction
         $this->sourceEndpoint->connect();
 
         $this->restIngestDir = $this->destinationEndpoint->getPath();
-        $this->isZipDownload = $this->sourceEndpoint->getIsZipDownload();
+        $this->isZipDownload = $this->destinationEndpoint->getFileExtension() === 'zip';
 
         $this->limit = $this->sourceEndpoint->getLimit();
         $this->offset = $this->sourceEndpoint->getOffset();
@@ -146,17 +165,16 @@ class RestIngestor extends aIngestor implements iAction
 
         if ( null === $this->etlSourceQuery && isset($this->parsedDefinitionFile->source_query) ) {
             $this->logger->debug("Create ETL source query object");
-            $this->parameterEndpoint = $this->sourceEndpoint->getRestParameterEndpoint();
-            $this->parameterEndpoint->connect();
+            $this->utilityEndpoint->connect();
             $this->etlSourceQuery = new Query(
                 $this->parsedDefinitionFile->source_query,
-                $this->parameterEndpoint->getSystemQuoteChar(),
+                $this->utilityEndpoint->getSystemQuoteChar(),
                 $this->logger
             );
 
             // If supported by the source query, set the date ranges here.
 
-            $this->getEtlOverseerOptions()->applyOverseerRestrictions($this->etlSourceQuery, $this->parameterEndpoint, $this);
+            $this->getEtlOverseerOptions()->applyOverseerRestrictions($this->etlSourceQuery, $this->utilityEndpoint, $this);
 
         }  // if ( null === $this->etlSourceQuery && isset($this->parsedDefinitionFile->source_query) )
 
@@ -221,8 +239,7 @@ class RestIngestor extends aIngestor implements iAction
             );
 
             $this->logger->debug("REST source query:\n$sql");
-            $handle = $this->parameterEndpoint->getHandle();
-            $this->etlSourceQueryResult = $handle->query($sql, array(), true);
+            $this->etlSourceQueryResult = $this->utilityHandle->query($sql, array(), true);
 
             if ( 0 == $this->etlSourceQueryResult->rowCount() ) {
                 $this->logger->warning("{$this} Source query return 0 rows, exiting");
