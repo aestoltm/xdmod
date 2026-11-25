@@ -15,7 +15,6 @@ namespace ETL;
 use Configuration\Configuration;
 use ETL\DataEndpoint\iDataEndpoint;
 use ETL\DataEndpoint\iRdbmsEndpoint;
-use ETL\DataEndpoint\Rest;
 use ETL\Configuration\EtlConfiguration;
 use Psr\Log\LoggerInterface;
 
@@ -457,7 +456,6 @@ abstract class aAction extends aEtlObject
             if ( $endpoint instanceof iRdbmsEndpoint ) {
                 $this->variableStore->UTILITY_SCHEMA = $endpoint->getSchema();
             }
-
             $this->logger->info("Utility endpoint: " . $endpoint);
             $this->utilityEndpoint = $endpoint;
             $this->utilityHandle = $endpoint->getHandle();
